@@ -1988,6 +1988,139 @@ fn copy_whole_table_pastes_a_table() {
     assert_eq!(body_table_cells(&s), vec![want.clone(), want]);
 }
 
+/// The tables in `blocks`, nested ones included.
+fn tables_in(blocks: &wordcraft_doc::Blocks) -> usize {
+    blocks
+        .iter()
+        .map(|b| match &**b {
+            wordcraft_doc::Block::Para(_) => 0,
+            wordcraft_doc::Block::Table(t) => 1 + t.rows.iter().flat_map(|r| r.cells.iter()).map(|c| tables_in(&c.blocks)).sum::<usize>(),
+        })
+        .sum()
+}
+
+/// The body's blocks in order: a paragraph with its text, or a table with its size.
+fn body_shape(s: &Session) -> Vec<String> {
+    s.doc
+        .body
+        .iter()
+        .map(|b| match &**b {
+            wordcraft_doc::Block::Para(p) => format!("Para({:?})", p.plain_text()),
+            wordcraft_doc::Block::Table(t) => format!("Table({}x{})", t.rows.len(), t.cols()),
+        })
+        .collect()
+}
+
+// GUARDRAIL: a selection covering a table exactly is only emptied by `Document::delete_range` —
+// the table survives its own content, so the paste went into the cell the caret was still in and
+// lost the rest — replace the whole table as a block instead (#4587).
+/// #4587: Select Table → Copy → Paste, pasting over the table it was copied from, replaces that
+/// table, as Cut of it does. The copy was once pasted inside the table's own first cell — deleting
+/// the selection only empties a table it covers whole — which lost every other cell's text.
+#[test]
+fn pasting_over_the_selected_table_replaces_it() {
+    let mut s = table3_doc();
+    let full = row_cells(&["A1", "B1", "C1", "A2", "B2", "C2", "A3", "B3", "C3"]);
+    run(&mut s, "table.selectTable", json!({}));
+    run(&mut s, "edit.copy", json!({}));
+    run(&mut s, "edit.paste", json!({}));
+    assert_eq!(body_table_cells(&s), vec![full.clone()], "the pasted table replaces the selected one, cell for cell");
+    assert_eq!(tables_in(&s.doc.body), 1, "the copy is not nested in the table's own cell");
+    // The blocks deliberately read as Cut-then-Paste does (the paste splits the paragraph the moved
+    // caret is in), so a change to that shape has to be made on purpose.
+    assert_eq!(
+        body_shape(&s),
+        ["Para(\"Intro\")", "Para(\"\")", "Table(3x3)", "Para(\"\")"],
+        "the table takes the removed one's place, after the paragraph Cut would paste into"
+    );
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(body_shape(&s), ["Para(\"Intro\")", "Table(3x3)", "Para(\"\")"], "one undo puts the original table back whole");
+    assert_eq!(body_table_cells(&s), vec![full], "the undone table kept every cell");
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(body_shape(&s), ["Para(\"Intro\")", "Para(\"\")", "Table(3x3)", "Para(\"\")"], "one redo removes it again");
+    assert_eq!(tables_in(&s.doc.body), 1, "redo leaves one table, not the removed one and the copy");
+}
+
+/// The reporter's table (#4587): 3×3, its first row filled and two rows empty, copied and pasted
+/// over itself. Its empty rows and its text are still there afterwards.
+#[test]
+fn pasting_the_reporters_table_over_itself_keeps_its_cells() {
+    let mut s = s();
+    run(&mut s, "document.setText", json!({"text": "Test\ntest\ntest"}));
+    run(&mut s, "caret.docStart", json!({}));
+    run(&mut s, "insert.table", json!({"rows": 3, "cols": 3}));
+    for (i, t) in ["Test", "test", "test"].iter().enumerate() {
+        if i > 0 {
+            run(&mut s, "text.tab", json!({}));
+        }
+        run(&mut s, "text.insert", json!({"text": t}));
+    }
+    let before = body_table_cells(&s);
+    run(&mut s, "table.selectTable", json!({}));
+    run(&mut s, "edit.copy", json!({}));
+    run(&mut s, "edit.paste", json!({}));
+    assert_eq!(body_table_cells(&s), before, "the table's text and its empty rows survive the paste");
+    assert_eq!(tables_in(&s.doc.body), 1, "the copy is not nested in the table's own cell");
+    let after = text(&s);
+    assert!(after.contains("Test\ttest\ttest\n\t\t\n\t\t"), "the row and the empty rows are still the table's: {after:?}");
+    assert!(after.ends_with("Test\ntest\ntest"), "the paragraphs below the table stay: {after:?}");
+}
+
+/// #4587 gap, pinned as today's behaviour (not endorsed): under Track Changes the whole-table
+/// selection keeps the emptying path, so the copy is still nested in the table's own first cell.
+/// Changing that needs tracked table deletion to replace a table, which is its own decision.
+#[test]
+fn a_tracked_paste_over_a_whole_table_still_empties_and_nests_it() {
+    let mut s = table3_doc();
+    run(&mut s, "review.trackChanges", json!({"value": true}));
+    run(&mut s, "table.selectTable", json!({}));
+    run(&mut s, "edit.copy", json!({}));
+    run(&mut s, "edit.paste", json!({}));
+    assert_eq!(tables_in(&s.doc.body), 2, "today the copy is nested in the table's own cell under Track Changes");
+    assert_eq!(body_shape(&s), ["Para(\"Intro\")", "Table(3x3)", "Para(\"\")"], "the tracked paste keeps the outer table");
+    assert_eq!(s.doc.revisions.len(), 2, "a tracked deletion and a tracked insertion");
+}
+
+/// The boundary that keeps `replaced_point` safe: a selection of *part* of a table is not a whole
+/// table, so the table stays — only the selected cells are emptied, and every other cell and the
+/// table's neighbours are untouched.
+#[test]
+fn pasting_over_part_of_a_table_keeps_the_table() {
+    let mut s = table3_doc();
+    run(&mut s, "table.selectTable", json!({}));
+    run(&mut s, "edit.copy", json!({}));
+    select_table_cells(&mut s, (0, 0), (0, 1));
+    run(&mut s, "edit.paste", json!({}));
+    assert_eq!(body_shape(&s), ["Para(\"Intro\")", "Table(3x3)", "Para(\"\")"], "the partly selected table is not removed");
+    assert_eq!(
+        body_table_cells(&s),
+        vec![row_cells(&["", "", "C1", "A2", "B2", "C2", "A3", "B3", "C3"])],
+        "the selected cells are emptied and the rest keep their text"
+    );
+    assert_eq!(tables_in(&s.doc.body), 2, "the copy goes inside the cell the caret is in, as any paste into a cell does");
+}
+
+/// Two tables in a row, only the first selected whole: the neighbour table and the paragraph before
+/// it keep their places — no table jumps ahead of `Intro`. A table with another table after it has
+/// no paragraph for `insert_fragment` to split (the caret is clamped back to an earlier one), so
+/// that shape keeps the path every paste took: the selected table is emptied and the copy nests in
+/// its cell.
+#[test]
+fn pasting_over_one_of_two_adjacent_tables_leaves_the_other_alone() {
+    let mut s = table3_doc();
+    run(&mut s, "caret.docEnd", json!({}));
+    run(&mut s, "insert.table", json!({"rows": 2, "cols": 2}));
+    assert_eq!(body_shape(&s), ["Para(\"Intro\")", "Table(3x3)", "Table(2x2)", "Para(\"\")"], "two adjacent tables");
+    let tp = wordcraft_doc::Path(vec![1]);
+    crate::cmd::table::select_range(&mut s, StoryRef::Body, &tp, (0, 2), (0, 2)).unwrap();
+    run(&mut s, "edit.copy", json!({}));
+    run(&mut s, "edit.paste", json!({}));
+    assert_eq!(body_shape(&s), ["Para(\"Intro\")", "Table(3x3)", "Table(2x2)", "Para(\"\")"], "no table jumps ahead of the paragraph before it");
+    let cells = body_table_cells(&s);
+    assert_eq!(cells.get(1), Some(&vec![String::new(); 4]), "the neighbour table is untouched: {cells:?}");
+    assert_eq!(tables_in(&s.doc.body), 3, "the selected table stays, with the copy nested in its cell");
+}
+
 /// #1744: Select Table → Cut removes the whole table, and one Undo brings it back.
 #[test]
 fn cut_whole_table_removes_it_and_undoes() {

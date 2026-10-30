@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use wordcraft_doc::edit::Fragment;
 use wordcraft_doc::{Block, Document, Paragraph};
 
-use super::{delete_selection, sel_result};
+use super::{Pos, delete_selection, sel_result};
 use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
 /// Largest clipboard payload Paste Special accepts, in bytes.
@@ -338,10 +338,39 @@ pub fn merge_formatting(s: &Session, frag: &mut Fragment) {
     }
 }
 
+/// Where the pasted fragment goes: the selection, deleted.
+///
+/// GUARDRAIL: `delete_selection` on a selection that is exactly one whole table only empties its
+/// cells — `Document::delete_range` keeps a table the range covers whole, as Word's Delete does —
+/// so a paste then inserted into the cell the caret was still in, burying the copy inside its own
+/// first cell and losing every other cell's text (#4587). A whole table selected is replaced whole
+/// instead, exactly as Cut removes it (`cmd::edit::cut`'s `delete_table_at`), unless Track Changes
+/// keeps it. Plain-text pastes (`insert_text`) still take the emptying path.
+///
+/// `restore_placeholder` cannot fire here: `delete_table_at` leaves the caret at offset 0 of a
+/// paragraph, and an empty control — the only kind it acts on, `ControlRange::is_empty` — accepts
+/// positions strictly past its start marker (`ControlRange::contains`), so `control_at` is `None`.
+fn replaced_point(s: &mut Session) -> Result<Pos, CmdError> {
+    let whole = super::table::selected_table(s).filter(|_| !s.doc.settings.track_changes);
+    let Some(tp) = whole else { return delete_selection(s) };
+    // The paste goes back where the table was, and `insert_fragment` reaches a block index through
+    // the paragraph it splits: with another table (or the end of the container) after the removed
+    // one, the caret is clamped back to an earlier paragraph and the paste lands before it — a
+    // table jumps ahead of its neighbours. Those shapes keep the path every paste took before.
+    let story = s.sel.focus.story;
+    let follows = tp.with_last(tp.last().saturating_add(1));
+    if !matches!(s.doc.block(story, &follows), Some(Block::Para(_))) {
+        return delete_selection(s);
+    }
+    super::table::delete_table_at(s, &tp)?;
+    super::controls::restore_placeholder(s)?;
+    Ok(s.sel.focus.clone())
+}
+
 /// Replace the selection with `frag`, marking it as an insertion under Track Changes.
 pub fn insert(s: &mut Session, mut frag: Fragment) -> Result<(), CmdError> {
     super::controls::prepare_edit(s)?;
-    let at = delete_selection(s)?;
+    let at = replaced_point(s)?;
     let track = s.doc.settings.track_changes;
     let mut rid = None;
     if track {
