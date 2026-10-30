@@ -12051,3 +12051,124 @@ fn an_empty_bulleted_mark_after_a_bulleted_section_closer_draws_no_bullet() {
         assert!(text, "{filler} lines above: the text closer keeps its bullet");
     }
 }
+
+/// #4272: a row with an at-least height (`w:trHeight w:val="4389"`, 219.45 pt) reserves that room
+/// and starts the next page whole instead of splitting there: the report's inline picture, and the
+/// text alone, both push the row past its minimum while it still fits a page.
+#[test]
+fn a_minimum_height_row_whose_picture_grew_it_moves_on_whole() {
+    use wordcraft_doc::props::{HeightRule, LineSpacing};
+    let line = |text: &str| {
+        let mut p = Paragraph::with_text(text, Default::default());
+        p.props.space_before = Some(0.0);
+        p.props.space_after = Some(0.0);
+        p.props.line_spacing = Some(LineSpacing::Exactly(14.0));
+        wordcraft_doc::para_block(p)
+    };
+    // `at_least_rows_filler` measures and asserts the room left above the table, so the geometry
+    // the assertions below rely on is measured, not assumed.
+    let row_doc = |room: f32, fill: &dyn Fn(&mut Table)| {
+        let (mut d, at) = at_least_rows_filler(room);
+        let mut t = Table::new(1, 3, 468.0);
+        t.rows[0].props.height = Some(219.45);
+        t.rows[0].props.height_rule = HeightRule::AtLeast;
+        t.rows[0].cells[1].blocks = vec![line("Left cell")];
+        t.rows[0].cells[2].blocks = vec![line("Right cell")];
+        fill(&mut t);
+        d.insert_block(StoryRef::Body, &Path::top(at), wordcraft_doc::Block::Table(t)).unwrap();
+        (d, at as u32)
+    };
+    let picture_cell = |height: f32, t: &mut Table| {
+        let mut p = Paragraph::with_text("", Default::default());
+        p.props.space_before = Some(0.0);
+        p.props.space_after = Some(0.0);
+        p.insert_object(0, picture(100.0, height, Default::default()), &Default::default()).unwrap();
+        t.rows[0].cells[0].blocks = vec![wordcraft_doc::para_block(p)];
+    };
+    let text_cell = |lines: usize, t: &mut Table| {
+        t.rows[0].cells[0].blocks = (0..lines).map(|k| line(&format!("Line {k}"))).collect();
+    };
+    // The pages holding a cell part of the row, the pages holding its picture, and its cell text
+    // lines as (page, cell).
+    let row_pages = |l: &DocLayout, end: u32| {
+        let mut cells: Vec<usize> = l
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page, p)| p.items.iter().filter_map(move |it| matches!(it, Placed::Cell { .. }).then_some(page)))
+            .collect();
+        cells.dedup();
+        let mut objects: Vec<usize> = l
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page, p)| p.items.iter().filter_map(move |it| matches!(it, Placed::Object { .. } | Placed::Image { .. }).then_some(page)))
+            .collect();
+        objects.dedup();
+        let texts: Vec<(usize, u32)> = l
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page, p)| {
+                p.items.iter().filter_map(move |it| match it {
+                    Placed::Lines { path, .. } if path.0.len() == 4 && path.0[0] == end => Some((page, path.0[2])),
+                    _ => None,
+                })
+            })
+            .collect();
+        (cells, objects, texts)
+    };
+    // A 300 pt picture in a row at least 219.45 pt tall makes the row 304.9 pt tall: with the 240
+    // pt left above it the row does not fit there, but it fits a page of its own, so it starts
+    // page two whole.
+    let (d, end) = row_doc(240.0, &|t| picture_cell(300.0, t));
+    let l = lay(&d);
+    assert_pagination_fixture_font(&l);
+    let (cells, objects, texts) = row_pages(&l, end);
+    // GUARDRAIL: the split left the row's cells on two pages with the picture alone on the second —
+    // a row's page fragments are the evidence, not its lines — assert the cells and the picture
+    // share one page.
+    assert_eq!(
+        (cells, objects),
+        (vec![1], vec![1]),
+        "the row moves on whole rather than splitting under the text{}",
+        pagination_fixture_diagnostics("#4272/page_foot", Some(&d), &l)
+    );
+    assert_eq!(texts, vec![(1, 0), (1, 1), (1, 2)], "every cell keeps its text on the row's page");
+
+    // A row taller than a page still splits: a 700 pt picture cannot fit anywhere.
+    let (d, end) = row_doc(240.0, &|t| picture_cell(700.0, t));
+    let l = lay(&d);
+    assert_pagination_fixture_font(&l);
+    let (cells, _, texts) = row_pages(&l, end);
+    assert!(cells.len() > 1, "a row taller than a page splits: {cells:?}{}", pagination_fixture_diagnostics("#4272/oversized", Some(&d), &l));
+    assert_eq!(texts.len(), 3, "all three cell paragraphs remain exactly once: {texts:?}");
+
+    // Text alone, no picture: 30 lines make the row about 421 pt, past its 219.45 pt minimum and
+    // short of a page. Any `w:trHeight` reads as at-least (`crates/docx/src/read/props.rs`), so the
+    // rule has to hold for a plain tall row too, or a narrowing back to "minimum vs room" would
+    // pass every other case here.
+    let (d, end) = row_doc(240.0, &|t| text_cell(30, t));
+    let l = lay(&d);
+    assert_pagination_fixture_font(&l);
+    let (cells, _, texts) = row_pages(&l, end);
+    let row_height = l
+        .pages
+        .iter()
+        .flat_map(|p| &p.items)
+        .find_map(|it| match it {
+            Placed::Cell { rect, row: 0, cell: 0, .. } => Some(rect.h),
+            _ => None,
+        })
+        .expect("the row is placed");
+    assert!(row_height > 219.45 && row_height < 648.0, "the row outgrows its minimum but fits a page: {row_height}");
+    assert_eq!(
+        cells,
+        vec![1],
+        "a tall text row with an at-least height moves on whole{}",
+        pagination_fixture_diagnostics("#4272/text_row", Some(&d), &l)
+    );
+    let lines_on: Vec<usize> = texts.iter().filter(|(_, cell)| *cell == 0).map(|(page, _)| *page).collect();
+    assert_eq!(lines_on.len(), 30, "all thirty lines remain: {lines_on:?}");
+    assert!(lines_on.iter().all(|page| *page == 1), "all thirty lines are on the row's page: {lines_on:?}");
+}

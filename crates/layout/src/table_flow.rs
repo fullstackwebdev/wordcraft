@@ -94,6 +94,25 @@ fn row_keeps_next(row: &table::RowLayout) -> bool {
         .unwrap_or(false)
 }
 
+/// An at-least row's minimum height is reserved, not split (#1618, #1742): a row whose room is
+/// shorter than its minimum starts the next page whole, and so does one that fits a page of its
+/// own but not `room` — the row a report's inline picture grew past its `w:trHeight` did (#4272).
+/// Only a row taller than a page splits, and only where the room holds its declared minimum.
+fn at_least_row_moves_on(row: &wordcraft_doc::Row, laid_height: f32, room: f32, page_height: f32) -> bool {
+    if row.props.height_rule != HeightRule::AtLeast {
+        return false;
+    }
+    // A row that fits where it stands never moves on, and every caller relies on the fit test it
+    // already made: without this guard the disjunct below answers "moves on" for a row with room
+    // to spare, and a lone caller that forgot its own check would push the row to a new page.
+    if laid_height <= room + 0.01 {
+        return false;
+    }
+    // A zero height reserves nothing (it lays out as Auto), so it must not pin the row whole.
+    let Some(min) = row.props.height.filter(|h| *h > 0.0) else { return false };
+    min > room + 0.01 || laid_height <= page_height + 0.01
+}
+
 fn row_can_start(row: &wordcraft_doc::Row, laid: &table::RowLayout, room: f32, page_height: f32) -> bool {
     if laid.height <= room + 0.01 {
         return true;
@@ -101,7 +120,10 @@ fn row_can_start(row: &wordcraft_doc::Row, laid: &table::RowLayout, room: f32, p
     if row.props.header || row.props.cant_split || (row.props.height_rule == HeightRule::Exact && row.props.height.is_some_and(|h| h > 0.0)) {
         return false;
     }
-    if row.props.height_rule == HeightRule::AtLeast && row.props.height.is_some_and(|h| h > room + 0.01 && h <= page_height + 0.01) {
+    // GUARDRAIL: a follower with an at-least height moves on whole, so a "can start" answer taken
+    // from `split_row` alone leaves the kept prefix behind on the old page, breaking the keep —
+    // ask the same move-on rule `place_table` uses before falling back to splitability.
+    if at_least_row_moves_on(row, laid.height, room, page_height) {
         return false;
     }
     table::split_row(laid, room).is_some()
@@ -156,11 +178,12 @@ pub(crate) fn place_table(ctx: &mut Ctx, pb: &mut PageBuilder, t: &wordcraft_doc
         pb.y += row.height;
         pb.content_bottom = pb.content_bottom.max(pb.y);
     };
-    // Measured in Word: an at-least row's minimum height is reserved, not split. Where less room
-    // than that is left on a page that already holds something, the row starts the next page
-    // whole; a row taller than a page then splits from the top of that page.
-    let short_of_min = |ri: usize, room: f32| {
-        t.rows.get(ri).is_some_and(|r| r.props.height_rule == HeightRule::AtLeast && r.props.height.is_some_and(|h| h > room + 0.01))
+    // The rule these callers share is `at_least_row_moves_on`'s: an at-least row reserves its
+    // minimum height and starts the next page whole rather than splitting, unless it is taller
+    // than a page. Pass the row's laid-out height and the page's own height, never the room left
+    // under the text — the two are what tell a row that fits a page from one that must split.
+    let moves_on_whole = |ri: usize, laid_height: f32, room: f32, page_height: f32| {
+        t.rows.get(ri).is_some_and(|r| at_least_row_moves_on(r, laid_height, room, page_height))
     };
     // Like Word, repeated header rows don't stay alone at the bottom of a page: when the first row
     // after them can't start under them there, the table starts on the next page.
@@ -169,9 +192,15 @@ pub(crate) fn place_table(ctx: &mut Ctx, pb: &mut PageBuilder, t: &wordcraft_doc
         && !pb.at_top()
         && let Some(row) = tl.rows.get(first)
     {
-        let room = pb.bottom - pb.y - tl.rows.iter().take(first).map(|r| r.height).sum::<f32>();
+        let room = pb.bottom - pb.y - repeated_height;
+        // GUARDRAIL: `pb.bottom` is capped to the balanced column height while columns balance, so
+        // judging "taller than a page" by it split the row during the balance search and moved it
+        // on whole in the final layout — measure the page with the uncapped bottom instead.
+        let page_height = pb.uncapped_bottom() - body_top - repeated_height;
         let splittable = !t.rows.get(first).is_some_and(|r| r.props.cant_split);
-        if row.height + row.edge > room + 0.01 && (short_of_min(first, room) || !(splittable && table::split_row(row, room).is_some())) {
+        if row.height + row.edge > room + 0.01
+            && (moves_on_whole(first, row.height, room, page_height) || !(splittable && table::split_row(row, room).is_some()))
+        {
             pb.advance(block, body_top);
         }
     }
@@ -212,10 +241,19 @@ pub(crate) fn place_table(ctx: &mut Ctx, pb: &mut PageBuilder, t: &wordcraft_doc
             if pb.y + cur.height + cur.edge <= pb.bottom + 0.01 && !defer_kept {
                 break;
             }
-            // An at-least row with less room than its minimum moves on whole, unless nothing
-            // is above it on this page (moving on would gain nothing).
+            // An at-least row whose minimum the room does not hold, or that fits a page of its
+            // own, moves on whole, unless nothing is above it on this page (moving on would gain
+            // nothing).
+            // GUARDRAIL: a min-height row whose picture grew it past `w:trHeight` still fits a page,
+            // so testing only the declared minimum against the room split it at the page foot and
+            // left the picture alone on the next page (#4272) — reserve the whole row and move on.
+            // The page's height is the uncapped one: `pb.bottom` is capped while columns balance.
             let room = pb.bottom - pb.y;
-            let moves_on = rest.is_none() && !pb.at_top() && !fresh && !under_top_headers && short_of_min(ri, room);
+            let moves_on = rest.is_none()
+                && !pb.at_top()
+                && !fresh
+                && !under_top_headers
+                && moves_on_whole(ri, cur.height, room, pb.uncapped_bottom() - body_top - repeated_height);
             let split = if splittable && !moves_on && !defer_kept { table::split_row(cur, room) } else { None };
             match split {
                 Some((a, b)) => {
