@@ -5371,6 +5371,95 @@ fn interface_size_is_absolute_and_auto_keeps_the_system_scale() {
     assert_eq!(a.session.view.zoom, doc_zoom, "document zoom is a separate setting");
 }
 
+/// One frame exactly as the winit backend reports one, so a fit that reads the monitor the way the
+/// backend fills it can be tested: egui-winit divides the monitor's physical pixels by
+/// `pixels_per_point = zoom_factor * native` (crates/egui-winit/src/lib.rs:89-92) for every frame
+/// (:3699-3703), so the injected monitor has to be recomputed per pass and shrink as the zoom grows.
+/// Returns the factor the pass was drawn at (physical pixels per point).
+fn interface_scale_frame(ctx: &egui::Context, a: &mut WordApp, native: f32, screen: egui::Vec2) -> f32 {
+    // GUARDRAIL: `zoom_factor()` here is the zoom the backend samples for this frame — a queued
+    // `set_zoom_factor` only lands in `begin_pass`, so this is one pass behind what the pass itself
+    // will draw at. Dividing by it is what egui-winit does; injecting a frozen `screen / native`
+    // instead made the monitor look constant and hid a fit that never settled (#4030).
+    let points = screen / (ctx.zoom_factor() * native);
+    // GUARDRAIL: clippy's `field_reassign_with_default` rejects `RawInput::default()` followed by a
+    // field assignment, so the rect goes in the initializer (`cargo xtask ci` runs clippy with
+    // `-D warnings`, and the crate suite alone never sees it).
+    let mut input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, points)), ..Default::default() };
+    let viewport = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+    viewport.native_pixels_per_point = Some(native);
+    viewport.monitor_size = Some(points);
+    ctx.run_ui(input, |ui| a.logic(ui.ctx())).drop_without_applying_deltas();
+    ctx.pixels_per_point()
+}
+
+/// The factors of `passes` consecutive frames, for asserting on the whole sequence: a fit that
+/// flips between two values passes any single-pass check and ripples a repaint of every viewport.
+fn interface_scale_passes(ctx: &egui::Context, a: &mut WordApp, native: f32, screen: egui::Vec2, passes: usize) -> Vec<f32> {
+    (0..passes).map(|_| interface_scale_frame(ctx, a, native, screen)).collect()
+}
+
+/// #4030: an 11-inch 1366×768 panel that a bare window manager reports at 200 % (winit guesses the
+/// scale from the monitor's DPI) leaves 683×384 points, less than the smallest window the app opens
+/// at (760×480): the ribbon and File › Options draw off the screen and the size cannot be changed
+/// back. Auto brings the scale down until that smallest window fits, and it has to STAY there — a
+/// fit that recomputes from a screen measured at the zoom it just left flips 200 % ↔ 160 % on every
+/// repaint. A screen with room for the display's own scale keeps it, a monitor change is followed,
+/// and a size chosen on purpose stays absolute (#822).
+#[test]
+fn interface_scale_fits_the_screen_it_is_drawn_on() {
+    let laptop = egui::vec2(1366.0, 768.0);
+    let roomy = egui::vec2(1920.0, 1080.0);
+
+    // The reported hardware: 1366×768 at a guessed 200 %.
+    let ctx = egui::Context::default();
+    let mut a = app();
+    let seq = interface_scale_passes(&ctx, &mut a, 2.0, laptop, 6);
+    // Passes 3–5 (and 6) must agree: a fit that recomputes from a screen measured at the zoom it is
+    // leaving lands on 2.0 → 1.6 → 1.28 → 1.28 → 1.6 → 2.0 instead, and every flip calls
+    // `set_zoom_factor`, which requests a repaint of every viewport.
+    assert!(
+        seq[2..].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-3),
+        "Auto must settle on one size instead of flipping between two, pass by pass: {seq:?}"
+    );
+    assert!((seq[2] - 1.6).abs() < 1e-3, "Auto draws 768 / 480 = 160% on a 1366×768 screen reported at 200%, not {seq:?}");
+    assert!((ctx.zoom_factor() - 0.8).abs() < 1e-3, "a settled fit leaves no zoom change queued: {}", ctx.zoom_factor());
+    assert!(!ctx.requested_repaint_last_pass(), "a settled fit asks for no repaint: the oscillation is gone, not small");
+    assert_eq!(a.run("ui.interfaceSize", json!({})).unwrap(), json!({"auto": true, "percent": 160}), "the size reported is the one drawn");
+
+    // A monitor that changes under the app: 1366×768 → 1920×1080 at the same 200 %.
+    let ctx_moved = egui::Context::default();
+    let mut b = app();
+    interface_scale_passes(&ctx_moved, &mut b, 2.0, laptop, 4);
+    assert!((ctx_moved.pixels_per_point() - 1.6).abs() < 1e-3, "fitted to the laptop first");
+    let moved = interface_scale_passes(&ctx_moved, &mut b, 2.0, roomy, 4);
+    assert!(moved[1..].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-3), "the fit follows the new screen and then settles: {moved:?}");
+    assert!((moved[1] - 2.0).abs() < 1e-3, "Room for the display's own scale keeps it, and follows the monitor: {moved:?}");
+    assert_eq!(b.run("ui.interfaceSize", json!({})).unwrap(), json!({"auto": true, "percent": 200}));
+
+    // A screen with room for the display's own scale keeps it from the first frame.
+    let ctx_roomy = egui::Context::default();
+    let mut c = app();
+    let kept = interface_scale_passes(&ctx_roomy, &mut c, 2.0, roomy, 4);
+    assert!(kept.iter().all(|v| (v - 2.0).abs() < 1e-3), "nothing to fit, so nothing changes: {kept:?}");
+    assert_eq!(c.run("ui.interfaceSize", json!({})).unwrap(), json!({"auto": true, "percent": 200}));
+
+    // A size chosen on purpose keeps meaning what it says: one screen pixel per point (#822).
+    let ctx_chosen = egui::Context::default();
+    let mut d = app();
+    d.run("ui.interfaceSize", json!({"percent": 100})).unwrap();
+    let absolute = interface_scale_passes(&ctx_chosen, &mut d, 2.0, laptop, 3);
+    // egui applies a zoom change at the start of the next pass (`set_zoom_factor` cannot change the
+    // pass already running), so the first pass still draws at the display scale.
+    assert!(absolute[1..].iter().all(|v| (v - 1.0).abs() < 1e-3), "100% is one screen pixel per point, not fitted: {absolute:?}");
+    // #4030: after frames have run, the reader must still answer with the size just set — the
+    // cached drawn scale is the previous frame's figure for a chosen size.
+    assert_eq!(d.run("ui.interfaceSize", json!({"percent": 150})).unwrap(), json!({"auto": false, "percent": 150}));
+    let chosen = interface_scale_passes(&ctx_chosen, &mut d, 2.0, laptop, 3);
+    assert!(chosen[1..].iter().all(|v| (v - 1.5).abs() < 1e-3), "a chosen 150% is drawn at 150%: {chosen:?}");
+    assert_eq!(d.run("ui.interfaceSize", json!({})).unwrap(), json!({"auto": false, "percent": 150}));
+}
+
 /// #822: a display scale egui doesn't know or that is nonsense counts as 1×.
 #[test]
 fn interface_size_survives_an_unusable_display_scale() {

@@ -119,6 +119,11 @@ impl WordApp {
             recent_fonts_for: Vec::new(),
             fonts_frames: 0,
             applied_theme: None,
+            // GUARDRAIL: never seed this with a number — a scale cached in the frame is UNKNOWN
+            // before the first frame, and seeding 1.0 made `ui.interfaceSize` report 100% after
+            // {"percent": 150} (a pre-existing test caught exactly that, #4030).
+            drawn_scale: None,
+            input_ppp: None,
             native_scale: 1.0,
             legacy_interface_size: None,
             // Inert until the app binary calls `watch_desktop_theme`.
@@ -277,7 +282,56 @@ impl WordApp {
         {
             self.ui.interface_size = theme::migrate_legacy_interface_size(old, native);
         }
-        let zoom = self.ui.interface_size.zoom_factor(self.native_scale);
+        // GUARDRAIL: Auto used to keep whatever scale the system reported, so a guessed 200% on a
+        // 1366x768 screen drew a window bigger than the screen and pushed File › Options out of
+        // reach (#4030). Fit Auto to the screen; a chosen size stays absolute and is not fitted.
+        // GUARDRAIL: the monitor arrives in egui POINTS — egui-winit divides the monitor's physical
+        // pixels by `pixels_per_point = zoom_factor * native` before handing them over
+        // (crates/egui-winit/src/lib.rs:89-92 and 3699-3703), and ViewportInfo documents all its
+        // units as those points. Physical pixels are points × that factor; multiplying by `native`
+        // alone measures a screen that shrinks as the zoom shrinks, so the fit has no fixed point
+        // (#4030).
+        // GUARDRAIL: that factor is NOT the pass's `ctx.pixels_per_point()`. eframe samples the input
+        // BEFORE running the pass (crates/eframe/src/native/wgpu_integration.rs:1268-1290) while a
+        // queued `set_zoom_factor` is applied inside the next `begin_pass`, before pixels_per_point
+        // is computed (crates/egui/src/context.rs:480-497). So this input was divided by
+        // `z_old * native` and the pass draws at `z_new * native`: using the drawing factor
+        // multiplies the estimate by z_new/z_old, every change under-measures the screen, and the
+        // fit walks instead of settling — measured on 1366×768 at 200 %: 2.0 → 1.6 → 1.28 → 1.28 →
+        // 1.6 → 2.0, two of every six frames left in the broken 200 % layout and a repaint of every
+        // viewport per flip. Hence `input_ppp`: the factor the backend sampled, remembered below.
+        // GUARDRAIL: `drawn_scale` cannot serve as that factor — it is assigned later in this same
+        // pass, after this pass's input was already sampled, so it describes the next frame.
+        // GUARDRAIL: on the first frame `input_ppp` is `None` and this falls back to
+        // `ctx.pixels_per_point()`, which is the same `native` there because nothing has queued a
+        // zoom change yet (z_old == z_new); the test asserts the settled value on passes 3–5, so a
+        // one-pass miscalculation on the first frame cannot hide.
+        // GUARDRAIL: read it OUTSIDE the `ctx.input` closure — `Context::pixels_per_point` is itself
+        // `self.input(|i| i.pixels_per_point)` (crates/egui/src/context.rs:2776-2778), so calling it
+        // inside re-enters that mutex and panics in epaint's guard.
+        let input_ppp = self.input_ppp.unwrap_or_else(|| ctx.pixels_per_point());
+        let physical = ctx.input(|i| {
+            let vp = i.viewport();
+            vp.monitor_size.or_else(|| vp.inner_rect.map(|r| r.size())).map(|points| points * input_ppp)
+        });
+        // GUARDRAIL: the fit is off on a 1× host: nothing there is a guess, and whether a 1× small
+        // screen should shrink too is the owner's decision, not a side effect. (The harness-hang
+        // story this comment used to tell does not apply here — egui_kittest sets only `screen_rect`
+        // and `native_pixels_per_point`, crates/egui_kittest/src/lib.rs:238-243, so no monitor
+        // reaches this code and `physical` is `None`.)
+        let drawn = match (physical, self.ui.interface_size.is_auto()) {
+            (Some(physical), true) if self.native_scale > 1.0 => theme::auto_scale(self.native_scale, physical),
+            _ => self.native_scale * self.ui.interface_size.zoom_factor(self.native_scale),
+        };
+        // GUARDRAIL: the only place this is known — a reader outside `logic` sees `None` and must
+        // fall back to `InterfaceSize::drawn_percent`, not to a seeded default (#4030).
+        let drawn = theme::usable_scale(drawn);
+        self.drawn_scale = Some(drawn);
+        // GUARDRAIL: the divisor the backend will use for the next frame's input, remembered while
+        // it is still readable: `set_zoom_factor` above only queues, so `zoom_factor()` here is the
+        // factor the next `update_viewport_info` will sample (#4030).
+        self.input_ppp = Some(ctx.zoom_factor() * self.native_scale);
+        let zoom = drawn / self.native_scale;
         if ctx.zoom_factor() != zoom {
             ctx.set_zoom_factor(zoom);
         }

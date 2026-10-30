@@ -184,6 +184,8 @@ impl WordApp {
             recover_fonts_for: _,
             fonts_frames: _,
             applied_theme: _,
+            drawn_scale: _,
+            input_ppp: _,
             native_scale: _,
             legacy_interface_size: _,
             desktop_theme: _,

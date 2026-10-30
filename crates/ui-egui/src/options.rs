@@ -668,8 +668,15 @@ fn theme_picker(app: &mut WordApp, ui: &mut Ui) {
 fn interface_size_picker(app: &mut WordApp, ui: &mut Ui) {
     use crate::theme::InterfaceSize;
     let size = app.ui.interface_size;
-    let native = ui.ctx().native_pixels_per_point().unwrap_or(1.0);
-    let auto = crate::i18n::fmt(tl!("Auto ({percent}%)"), &[("percent", &InterfaceSize::AUTO.drawn_percent(native).to_string())]);
+    // GUARDRAIL: the label must name the size Auto really draws at, fitted to the screen (#4030);
+    // reporting the display's own scale promised 200% while 160% was drawn.
+    // GUARDRAIL: same resolution as `ui.interfaceSize` — the cached scale only answers for Auto.
+    // For a chosen size it is the previous frame's figure, so the setting itself is the answer.
+    let auto_percent = match (size.is_auto(), app.drawn_scale) {
+        (true, Some(drawn)) => (drawn * 100.0).round().clamp(0.0, f32::from(u16::MAX)) as u16,
+        _ => InterfaceSize::AUTO.drawn_percent(app.native_scale),
+    };
+    let auto = crate::i18n::fmt(tl!("Auto ({percent}%)"), &[("percent", &auto_percent.to_string())]);
     let selected = size.percent().map_or_else(|| auto.clone(), |pct| format!("{pct}%"));
     ui.horizontal(|ui| {
         let label = ui.label(tl!("Interface size:"));

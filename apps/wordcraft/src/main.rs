@@ -27,6 +27,7 @@ mod traffic_lights;
 use wordcraft_engine::Session;
 use wordcraft_ui_egui::{
     Services, UiState, WordApp,
+    theme::SMALLEST_WINDOW,
     window_geometry::{RawWindowState, WindowGeometry, take_rescue},
 };
 
@@ -434,7 +435,10 @@ fn main() -> eframe::Result {
             .with_title("WordCraft")
             .with_app_id("ai.storyteller.wordcraft")
             .with_inner_size([1440.0, 920.0])
-            .with_min_inner_size([760.0, 480.0])
+            // GUARDRAIL: Auto fits the interface to the smallest window, so the window minimum and
+            // the fit target must be one constant — two 760/480 literals drift and Auto then fits
+            // a window the app can open smaller than (or larger than) the one drawn (#4030).
+            .with_min_inner_size(SMALLEST_WINDOW)
             .with_drag_and_drop(true)
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)

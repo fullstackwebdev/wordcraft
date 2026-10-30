@@ -647,7 +647,17 @@ impl WordApp {
                     }
                 }
                 let size = self.ui.interface_size;
-                json!({"auto": size.is_auto(), "percent": size.drawn_percent(self.native_scale)})
+                // GUARDRAIL: Auto is now fitted to the screen, so the reported percent must come from what is
+                // drawn, not from display_scale × zoom_factor — those diverge exactly when Auto fits.
+                // GUARDRAIL: a setter followed by a reader must report the size just set, so the
+                // cached drawn scale is only the answer for Auto — for a chosen size it is the
+                // PREVIOUS frame's figure (a machine that last drew Auto at 200 % answered 200 to
+                // {"percent": 150}). Everything else comes from the setting itself (#4030).
+                let percent = match (size.is_auto(), self.drawn_scale) {
+                    (true, Some(drawn)) => (drawn * 100.0).round().clamp(0.0, f32::from(u16::MAX)) as u16,
+                    _ => size.drawn_percent(self.native_scale),
+                };
+                json!({"auto": size.is_auto(), "percent": percent})
             }
             "ui.animations" => {
                 // `system` (follow the system's animation setting), `on` or `off`; no value reads

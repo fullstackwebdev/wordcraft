@@ -130,6 +130,25 @@ impl InterfaceSize {
     }
 }
 
+/// The smallest window the app opens at, in points; Auto keeps the interface inside it.
+pub const SMALLEST_WINDOW: egui::Vec2 = egui::Vec2 { x: 760.0, y: 480.0 };
+
+/// The scale Auto draws at, given the display's own scale and the screen's size in PHYSICAL pixels.
+///
+/// GUARDRAIL: a bare window manager on X11 makes winit guess 200% from a monitor's DPI, and at
+/// 1366x768 that leaves 683x384 points — smaller than [`SMALLEST_WINDOW`], so File › Options and
+/// the ribbon draw off-screen and the size cannot be changed back (#4030). Auto therefore reduces
+/// the display's scale until the smallest window fits; a screen with room keeps the system scale,
+/// and a size chosen on purpose stays absolute (#822), which is why this is only used for Auto.
+pub fn auto_scale(native: f32, physical: egui::Vec2) -> f32 {
+    let native = usable_scale(native);
+    if !(physical.x.is_finite() && physical.y.is_finite()) || physical.x <= 0.0 || physical.y <= 0.0 {
+        return native;
+    }
+    let fits = (physical.x / SMALLEST_WINDOW.x).min(physical.y / SMALLEST_WINDOW.y);
+    native.min(fits.max(0.0))
+}
+
 /// The display's scale, or 1.0 when egui doesn't know it (or reports nonsense).
 pub fn usable_scale(native: f32) -> f32 {
     if native.is_finite() && native > 0.0 { native } else { 1.0 }

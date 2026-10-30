@@ -541,6 +541,17 @@ pub struct WordApp {
     fonts_frames: u32,
     /// The effective interface theme last installed in egui ([`theme::apply`]).
     applied_theme: Option<theme::Appearance>,
+    /// The scale the interface is actually drawn at last frame (physical pixels per point): the
+    /// display scale for a chosen size, and the fitted one for Auto ([`theme::auto_scale`]).
+    /// GUARDRAIL: `None` until a frame has run — a command or label read outside `logic` must fall
+    /// back to [`theme::InterfaceSize::drawn_percent`], because the cache holds no answer yet and a
+    /// seeded default reported 100% for a size that was just set (#4030).
+    drawn_scale: Option<f32>,
+    /// The pixels_per_point egui-winit divided the last frame's monitor size by, seen one pass
+    /// ahead: a queued `set_zoom_factor` lands after the backend has sampled it, so the factor the
+    /// input was produced with is not `Context::pixels_per_point()` inside the frame (#4030).
+    /// `None` before the first frame, where the two agree.
+    input_ppp: Option<f32>,
     /// The display scale (native pixels per point) seen in the last frame, 1.0 before the first;
     /// `ui.interfaceSize` reports the size Auto draws at with it.
     native_scale: f32,
