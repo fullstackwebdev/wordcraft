@@ -1,9 +1,41 @@
 use super::{
-    Arc, Blocks, ContentTypes, DocxError, El, MAX_FONT_NAME, MAX_HF_DEPTH, MAX_PARTS, MAX_TABLE_FONTS, MAX_VBA_RELATED, PartKind, Reader, Rels,
-    Revision, RevisionKind, Rgb, StoryCtx, VBA_PROJECT_PART, VBA_RELATED, props, shape_style,
+    AltChunk, Arc, Blocks, ContentTypes, DocxError, El, MAX_ALT_CHUNKS, MAX_FONT_NAME, MAX_HF_DEPTH, MAX_PARTS, MAX_TABLE_FONTS, MAX_VBA_RELATED,
+    PartKind, Reader, Rels, Revision, RevisionKind, Rgb, StoryCtx, VBA_PROJECT_PART, VBA_RELATED, props, shape_style,
 };
 
 impl Reader<'_> {
+    /// Collect the chunk a `w:altChunk` refers to (see [`AltChunk`]): the part its relationship
+    /// names, with the content type the package declares for it, to stand where the element is
+    /// when the caller can read its format. A chunk that names no part, or more than
+    /// [`MAX_ALT_CHUNKS`] of them, is left out (logged).
+    pub(super) fn alt_chunk(&mut self, e: &El, rels: &Rels, at: usize) {
+        if !self.collect_chunks {
+            return;
+        }
+        if self.alt_chunks.len() >= MAX_ALT_CHUNKS {
+            log::warn!("docx: more than {MAX_ALT_CHUNKS} embedded documents; the rest are left out");
+            return;
+        }
+        // GUARDRAIL: `r:id` is the relationship (Word writes it), but older producers write the same
+        // id as `w:id` — reading only one of them left those files' content out with no sign that
+        // anything was there (#4374) — fall back to `w:id`.
+        let Some(id) = e.attr("r:id").or_else(|| e.attr("w:id")) else { return };
+        let Some(rel) = rels.by_id(id).filter(|r| !r.external) else {
+            log::warn!("docx: altChunk {id:?} names no part of the package; left out");
+            return;
+        };
+        // GUARDRAIL: a chunk part is often most of the document (a whole page in an MHT) — copying
+        // it here held the page twice while the file opened, as copied pictures once did (#12) —
+        // share the package's bytes and only clone the `Arc`.
+        let Some(bytes) = self.pkg.get_shared(&rel.target) else {
+            log::warn!("docx: the altChunk part {} is missing; left out", rel.target);
+            return;
+        };
+        let pkg = self.pkg;
+        let content_type = self.content_types.get_or_insert_with(|| ContentTypes::read(pkg)).of(&rel.target).unwrap_or("").to_string();
+        let bytes = Arc::clone(bytes);
+        self.alt_chunks.push(AltChunk { at, content_type, bytes });
+    }
     /// Keep the parts the VBA project at `project` relates to, with their relationship types and
     /// content types (see [`VBA_RELATED`]). Parts outside `word/`, relationship parts, the project
     /// itself and missing targets are skipped (logged); at most [`MAX_VBA_RELATED`] are kept.
@@ -252,5 +284,94 @@ impl Reader<'_> {
             }
         }
         self.pc.color_map = Some(map);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    const W_NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    const ROOT_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+
+    /// The page html-docx-js puts in the chunk part, as Zotero's Better Notes exports it.
+    const PAGE: &str = "<html><body><p>Verbeke and Lee, 2021</p></body></html>";
+
+    /// A package shaped like a Better Notes export: the body holds `body`, and `htmlChunk` names
+    /// `word/afchunk.html`, declared `text/html`.
+    fn export(body: &str) -> Vec<u8> {
+        let content_types = concat!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+            r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
+            r#"<Default Extension="xml" ContentType="application/xml"/>"#,
+            r#"<Default Extension="html" ContentType="text/html"/>"#,
+            r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#,
+            r#"<Override PartName="/word/afchunk.html" ContentType="text/html"/></Types>"#,
+        );
+        let rels = concat!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Id="htmlChunk" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk" Target="/word/afchunk.html"/>"#,
+            r#"</Relationships>"#,
+        );
+        let doc = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {W_NS}><w:body>{body}</w:body></w:document>"#);
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in [
+            ("[Content_Types].xml", content_types.as_bytes()),
+            ("_rels/.rels", ROOT_RELS.as_bytes()),
+            ("word/document.xml", doc.as_bytes()),
+            ("word/_rels/document.xml.rels", rels.as_bytes()),
+            ("word/afchunk.html", PAGE.as_bytes()),
+        ] {
+            zw.start_file(name, opts).unwrap();
+            zw.write_all(bytes).unwrap();
+        }
+        zw.finish().unwrap().into_inner()
+    }
+
+    /// The reported defect: a Better Notes export is one `w:altChunk` and nothing else, so the
+    /// body as read has no content at all and the file looks empty (#4374). The chunk is what
+    /// holds the page, with the place it takes.
+    #[test]
+    fn an_exported_page_is_one_chunk_and_no_blocks() {
+        let bytes = export(r#"<w:altChunk r:id="htmlChunk"/><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>"#);
+        let (doc, chunks) = crate::read_with_chunks(&bytes, None).unwrap();
+        assert!(doc.plain_text(wordcraft_doc::StoryRef::Body).trim().is_empty(), "the reader has no blocks to show");
+        assert_eq!(chunks.len(), 1, "the page is in the chunk");
+        let chunk = &chunks[0];
+        assert_eq!(chunk.at, 0);
+        assert_eq!(chunk.content_type, "text/html");
+        assert_eq!(chunk.bytes.as_slice(), PAGE.as_bytes());
+        assert_eq!(doc.last_section.page_w, 612.0, "the section the file gives is read as before");
+    }
+
+    /// The chunk stands where it was written, in the body as read: the blocks around it are
+    /// counted, so a producer that wraps a page in its own paragraphs keeps them.
+    #[test]
+    fn a_chunk_between_paragraphs_keeps_its_place() {
+        let bytes = export(r#"<w:p><w:r><w:t>before</w:t></w:r></w:p><w:altChunk r:id="htmlChunk"/><w:p><w:r><w:t>after</w:t></w:r></w:p>"#);
+        let (doc, chunks) = crate::read_with_chunks(&bytes, None).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].at, 1, "between the two paragraphs");
+        assert_eq!(doc.body.len(), 2);
+    }
+
+    /// A plain read is unchanged: no chunk part is materialised, so a document that carries a
+    /// whole page in one does not pay for it when nobody can read it.
+    #[test]
+    fn a_plain_read_collects_nothing() {
+        let bytes = export(r#"<w:p><w:r><w:t>before</w:t></w:r></w:p><w:altChunk r:id="htmlChunk"/>"#);
+        let doc = crate::read(&bytes).unwrap();
+        assert_eq!(doc.plain_text(wordcraft_doc::StoryRef::Body).trim(), "before");
+    }
+
+    /// A chunk that names no part, or a part the package lacks, is left out rather than failing
+    /// the whole document: the rest of the file still opens.
+    #[test]
+    fn a_chunk_with_no_part_is_left_out() {
+        let bytes = export(r#"<w:p><w:r><w:t>kept</w:t></w:r></w:p><w:altChunk r:id="missing"/>"#);
+        let (doc, chunks) = crate::read_with_chunks(&bytes, None).unwrap();
+        assert!(chunks.is_empty(), "{chunks:?}");
+        assert_eq!(doc.plain_text(wordcraft_doc::StoryRef::Body).trim(), "kept");
     }
 }

@@ -140,6 +140,8 @@ Ranked, to beta (detail and remaining milestones in [docs/roadmap.md](docs/roadm
 
 ## Progress log
 
+- 2026-10-31: A DOCX `w:altChunk` document is imported where the element stood: an HTML page, or the page inside the MIME HTML body html-docx-js writes, so a Zotero Better Notes export opens with its text instead of a blank page (#4374). The page's field codes (Zotero's `supportFields` blocks, `msEquation`), its MIME pictures and chunks of other formats are not read; a save writes the imported content as ordinary paragraphs.
+
 - 2026-10-28: Aligned-copy review fixes keep the document axis locked through middle-button scrolling and let Ctrl/Command+Shift start on a secondary selected object. Plain Ctrl and Shift clicks keep their existing behavior (#4764).
 
 - 2026-10-28: Ctrl/Command+Shift copies a selected floating picture, shape or text box along its dominant axis (#4764); inline copies keep the text cursor. Guides on the free axis, original/clipboard/selection, cancel, protection and history are covered by synthetic Linux tests. Native desktop and Word untested; readiness unchanged.
@@ -685,6 +687,7 @@ Footer page-table height and body wrapping are corrected. Other pagination gaps 
 | 2026-10-28 | trivial | Note conversion walks reference offsets and formatting runs together, #4750; readiness estimates unchanged. |
 | 2026-10-29 | trivial | DOCX comment IDs use ordered paragraph lookup and one durable-ID reservation set; threading and ID rules unchanged |
 | 2026-10-28 | trivial | #4658: bound Markdown reference-label rejection work, preserving literal source and ordinary link matching |
+| 2026-10-31 | trivial | Progress log: DOCX `w:altChunk` HTML and MIME HTML pages imported in place (#4374) |
 | 2026-10-29 | trivial | Progress log: Insert › Shapes icon grid (#4349) |
 | 2026-10-29 | trivial | HTML import keeps preformatted lines with CR, CRLF or LF input newlines (#4810); numeric character references retain their separate meaning; readiness estimates unchanged. |
 | 2026-10-29 | trivial | Progress log: window fallback geometry and equation symbol tooltips |

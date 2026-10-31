@@ -2,6 +2,7 @@
 
 use wordcraft_doc::Document;
 
+mod alt_chunk;
 #[cfg(not(target_arch = "wasm32"))]
 mod safe_save;
 
@@ -140,6 +141,16 @@ fn opened(doc: &mut Document) {
     crate::cmd::references::refresh_date_fields(doc);
 }
 
+/// Open a Word package, with the content of the documents it embeds through `w:altChunk` in
+/// place (#4374): a producer that writes its file from HTML (html-docx-js, behind Zotero's Better
+/// Notes, among others) puts everything in such a chunk, so leaving it out opened the file blank.
+/// `password` as [`wordcraft_docx::read_with_password`].
+pub(crate) fn open_word_package(bytes: &[u8], password: Option<&str>) -> Result<Document, String> {
+    let (mut doc, chunks) = wordcraft_docx::read_with_chunks(bytes, password).map_err(|e| e.to_string())?;
+    alt_chunk::insert(&mut doc, chunks);
+    Ok(doc)
+}
+
 /// Parse a document from bytes; `name` gives the format by extension.
 pub fn open_bytes(name: &str, bytes: &[u8]) -> Result<Document, String> {
     open_bytes_with(name, bytes, None).map(|(doc, _)| doc)
@@ -201,7 +212,10 @@ fn load_embedded_fonts(doc: &Document) {
 fn read_bytes(name: &str, bytes: &[u8], password: Option<&str>, page: &wordcraft_doc::SectionProps) -> Result<(Document, bool), String> {
     let ext = ext_of(name);
     if matches!(ext.as_str(), "docx" | "docm" | "dotx" | "dotm" | "doc" | "dot") && wordcraft_docx::is_encrypted(bytes) {
-        let mut doc = wordcraft_docx::read_with_password(bytes, password).map_err(|e| e.to_string())?;
+        // GUARDRAIL: an encrypted package of a producer that embeds its content (a password-protected
+        // html-docx-js export) opens with its content, not blank: the embedded documents are read
+        // here too, not only on the plain path (#4374).
+        let mut doc = open_word_package(bytes, password)?;
         opened(&mut doc);
         return Ok((doc, true));
     }
@@ -346,9 +360,9 @@ fn open_by_content(
     page: &wordcraft_doc::SectionProps,
 ) -> Result<(Document, bool), String> {
     let (mut doc, encrypted) = if bytes.starts_with(OLE_SIG) && wordcraft_docx::is_encrypted(bytes) {
-        (wordcraft_docx::read_with_password(bytes, password).map_err(|e| e.to_string())?, true)
+        (open_word_package(bytes, password)?, true)
     } else if bytes.starts_with(ZIP_SIG) {
-        (wordcraft_docx::read(bytes).map_err(|e| format!("{name}: not a document WordCraft can open ({e})"))?, false)
+        (open_word_package(bytes, None).map_err(|e| format!("{name}: not a document WordCraft can open ({e})"))?, false)
     } else if bytes.starts_with(OLE_SIG) {
         open_binary_doc(bytes, password)
             .map_err(|e| if needs_password(&e) || wrong_password(&e) { e } else { format!("{name}: not a document WordCraft can open ({e})") })?

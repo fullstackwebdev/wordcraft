@@ -123,7 +123,7 @@ The same gaps grouped the way the parity documents are, for agents working in on
   Options › Animation effects › Use system setting reads macOS (Reduce motion) and the Linux/BSD
   desktops (`apps/wordcraft/src/animations.rs`) but hasn't been tried on a Mac or in a real
   GNOME or KDE session yet.
-- **File-format gaps:** #1, #2, #5, #9 (`.doc` only), #14, #19, #23, #26; embedded fonts; `w:altChunk` and sub-documents.
+- **File-format gaps:** #1, #2, #5, #9 (`.doc` only), #14, #19, #23, #26; embedded fonts; `w:subDoc` and embedded documents WordCraft can't read (an HTML or MIME HTML `w:altChunk` is imported, #4374; the field codes inside one are not).
 - **Hardware gaps:** #6, #12, #28; scanner/Continuity Camera insert; KDE soft text (#140).
 - **Localization gaps:** #8, #11, #16, #17; native-speaker review of every catalog (human).
 - **Stability and performance gaps:** #3, #20.
@@ -152,6 +152,7 @@ Recipient label generation (#4880) now includes all selected recipients across a
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-31 | trivial | #4374: a DOCX `w:altChunk` document is imported where the element stood — HTML, or the MIME HTML page html-docx-js writes — so a Zotero Better Notes export opens with its content instead of blank; its field codes, its MIME pictures and chunks of other formats are not read, and a save writes the content as ordinary paragraphs |
 | 2026-10-28 | trivial | Aligned copies retain their locked document coordinate during middle-button scrolling and can start on secondary selected objects; existing Ctrl and Shift selection behavior stays (#4764) |
 | 2026-10-28 | trivial | Ctrl/Command+Shift drags a selected floating object into an axis-aligned copy (#4764); synthetic Linux interaction and persistence controls, native desktop and Word untested; gap/readiness estimates unchanged |
 | 2026-10-28 | trivial | Connector object lookups retain the typed column-selection inputs on current main (#3631); readiness estimates unchanged |

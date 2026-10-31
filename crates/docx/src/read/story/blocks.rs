@@ -70,6 +70,11 @@ impl Reader<'_> {
                     }
                 }
                 "w:moveFromRangeStart" | "w:moveFromRangeEnd" | "w:moveToRangeStart" | "w:moveToRangeEnd" => self.move_range(e),
+                // GUARDRAIL: a `w:altChunk` is a whole embedded document, not an element to skip —
+                // Word shows its content here, and skipping it is what made every html-docx-js
+                // export (Zotero's Better Notes among them) open blank (#4374). Report the chunk
+                // with its place in the body so the caller can put its content there.
+                "w:altChunk" => self.alt_chunk(e, rels, out.len()),
                 _ => {}
             }
         }

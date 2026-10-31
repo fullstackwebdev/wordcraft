@@ -14,6 +14,10 @@ pub mod html;
 pub mod latex;
 pub mod markdown;
 pub mod mathml;
+// GUARDRAIL: an MHT is not an import format on its own (its page still goes through `html`) — it
+// is the container a Word package's `w:altChunk` may hold, so it is a module, not an `EXTENSIONS`
+// entry; adding one would claim `.mht` files open as documents (#4374).
+pub mod mht;
 pub mod model;
 pub mod odt;
 pub mod rtf;

@@ -63,6 +63,24 @@ const MAX_BIBLIOGRAPHY_PARTS: usize = 64;
 /// Longest attached-template path we keep (bytes); a longer one is not a real path.
 const MAX_TEMPLATE_PATH: usize = 32 * 1024;
 
+/// Most `w:altChunk` chunks collected from one document.
+const MAX_ALT_CHUNKS: usize = 64;
+
+/// An embedded document a main body refers to with `w:altChunk` (ECMA-376 Part 1 §17.3.1.1):
+/// the chunk part's content, and where in the body its content belongs.
+#[derive(Clone, Debug)]
+pub struct AltChunk {
+    /// Index into the read document's body of the block the chunk stood before. The caller
+    /// splices the content there, in the order the chunks were collected from the end backwards
+    /// (an insertion moves every later block).
+    pub at: usize,
+    /// The part's content type from `[Content_Types].xml`, as the package declares it
+    /// (`text/html; charset=utf-8`, `message/rfc822`, …).
+    pub content_type: String,
+    /// The chunk part's bytes, as stored.
+    pub bytes: Arc<Vec<u8>>,
+}
+
 pub(crate) struct Reader<'p> {
     pkg: &'p Package,
     pub doc: Document,
@@ -110,6 +128,11 @@ pub(crate) struct Reader<'p> {
     pub theme_fills: shape_style::ThemeFills,
     /// The fill of the group being read (what its members' `a:grpFill` stands for).
     pub group_fill: Option<wordcraft_doc::fill::Fill>,
+    /// Whether the `w:altChunk` chunk parts are collected (a caller that can read their format
+    /// asks for them; a plain read never materialises them).
+    collect_chunks: bool,
+    /// The chunks collected so far, in document order (see [`AltChunk`]).
+    alt_chunks: Vec<AltChunk>,
 }
 
 /// The package path that internal relationship `id` points at, if it has type `kind` (an `rt`
@@ -133,9 +156,19 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<Document, DocxError> {
     read_opened(&Package::open(bytes)?)
 }
 
+/// [`read_package`], also collecting the body's `w:altChunk` chunks (see [`AltChunk`]).
+pub(crate) fn read_package_chunks(bytes: &[u8]) -> Result<(Document, Vec<AltChunk>), DocxError> {
+    read_opened_chunks(&Package::open(bytes)?, true)
+}
+
 /// Read a package whose parts are already unpacked (from a zip, a Flat OPC file or a converted
 /// Word 2003 XML document).
 pub(crate) fn read_opened(pkg: &Package) -> Result<Document, DocxError> {
+    read_opened_chunks(pkg, false).map(|(doc, _)| doc)
+}
+
+/// [`read_opened`], keeping the `w:altChunk` chunk parts when `chunks` is set.
+pub(crate) fn read_opened_chunks(pkg: &Package, chunks: bool) -> Result<(Document, Vec<AltChunk>), DocxError> {
     let root_rels = pkg.rels("");
     let main = root_rels.by_type(rt::OFFICE_DOC).filter(|r| !r.external).map(|r| r.target.clone()).unwrap_or_else(|| "word/document.xml".to_string());
     let Some(root) = pkg.xml_strict(&main)? else {
@@ -175,6 +208,8 @@ pub(crate) fn read_opened(pkg: &Package) -> Result<Document, DocxError> {
         txbx_links: Vec::new(),
         theme_fills: Default::default(),
         group_fill: None,
+        collect_chunks: chunks,
+        alt_chunks: Vec::new(),
     };
     r.pc.major_font = r.doc.settings.major_font.clone();
     r.pc.minor_font = r.doc.settings.minor_font.clone();
@@ -322,8 +357,14 @@ pub(crate) fn read_opened(pkg: &Package) -> Result<Document, DocxError> {
         keep_glued_ids(&mut r.doc, &r.glued);
     }
     let mut doc = r.doc;
-    doc.ensure_nonempty();
-    Ok(doc)
+    // GUARDRAIL: a body whose only content is a `w:altChunk` is empty here — the caller places
+    // the chunk's blocks itself, and a placeholder paragraph added now would land after that
+    // page's own last paragraph instead of the file's one paragraph (#4374). The chunk-reading
+    // caller empties-then-fills the body, so only the plain read needs the placeholder.
+    if !chunks {
+        doc.ensure_nonempty();
+    }
+    Ok((doc, r.alt_chunks))
 }
 
 /// Most move ranges open at once, and most move names tracked, per file.

@@ -32,6 +32,8 @@ pub use crypt::{
 };
 pub use flat::{XmlKind, sniff_xml, write as write_flat};
 pub use fonts::{EmbeddedFont, embedded_fonts};
+// The embedded-document type [`read_with_chunks`] hands back.
+pub use read::AltChunk;
 pub use read::read;
 pub use smart_art::smart_art_items;
 pub use wordml2003_write::write as write_wordml2003;
@@ -89,6 +91,26 @@ pub fn read_with_password(bytes: &[u8], password: Option<&str>) -> Result<wordcr
         return read::read_package(&package);
     }
     read(bytes)
+}
+
+/// [`read_with_password`], also returning the embedded documents the main body refers to with
+/// `w:altChunk` (ECMA-376 Part 1 §17.3.1.1), in the order they stood in the body. The chunk's
+/// content is not part of the document as read: the caller puts it in place, at the index each
+/// [`AltChunk`] carries, when it knows how to read the chunk's format (HTML and MIME HTML cover
+/// what Word's embedded-document producers write).
+///
+/// A flat OPC or Word 2003 XML file keeps its chunks unread: [`read_xml`] has no caller to place
+/// their content. A document whose whole content is in chunks comes back with an empty body —
+/// the caller fills it where each chunk stood.
+// GUARDRAIL: this is a second entry point, not a change to `read` — collecting the chunks
+// materialises whole parts (an MHT page can be most of the file), and every caller that can't read
+// their format would pay for it (#4374).
+pub fn read_with_chunks(bytes: &[u8], password: Option<&str>) -> Result<(wordcraft_doc::Document, Vec<AltChunk>), DocxError> {
+    if is_encrypted(bytes) {
+        let package = zeroize::Zeroizing::new(decrypt(bytes, password)?);
+        return read::read_package_chunks(&package);
+    }
+    read::read_package_chunks(bytes)
 }
 
 /// Which kind of WordprocessingML package to write. The main part's content type differs per

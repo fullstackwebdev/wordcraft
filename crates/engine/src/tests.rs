@@ -11475,3 +11475,69 @@ fn scale_font_sizes_reaches_char_table_and_cs_sizes_and_unset_default() {
     assert_eq!(grid.header_chr.size, Some(16.0));
     assert_eq!(grid.regions.get(&TablePart::Band2Horz).unwrap().chr.size, Some(10.0));
 }
+
+/// A Zotero Better Notes export (html-docx-js): the body is one `w:altChunk` naming an MHT page
+/// — no paragraphs, no styles, no numbering — and the page is the whole document.
+fn better_notes_export() -> Vec<u8> {
+    use std::io::Write;
+    const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    const RELS: &str = r#"xmlns="http://schemas.openxmlformats.org/package/2006/relationships""#;
+    const TYPE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let document = format!(
+        r#"<w:document {W}><w:body><w:altChunk r:id="htmlChunk"/><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#
+    );
+    let rels = format!(r#"<Relationships {RELS}><Relationship Id="htmlChunk" Type="{TYPE}/aFChunk" Target="/word/afchunk.mht"/></Relationships>"#);
+    let content_types = concat!(
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+        r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
+        r#"<Default Extension="xml" ContentType="application/xml"/>"#,
+        r#"<Default Extension="mht" ContentType="message/rfc822"/>"#,
+        r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#,
+        r#"</Types>"#,
+    );
+    // The page part as html-docx-js writes it: quoted-printable inside a `multipart/related`.
+    let mht = concat!(
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/related; boundary=\"----=_NextPart_01D8\"; type=\"text/html\"\r\n",
+        "\r\n",
+        "------=_NextPart_01D8\r\n",
+        "Content-Location: file:///C:/Temp/document.html\r\n",
+        "Content-Transfer-Encoding: quoted-printable\r\n",
+        "Content-Type: text/html; charset=\"utf-8\"\r\n",
+        "\r\n",
+        "<html><body><p>Zotero note</p><p>(Verbeke and Lee, 2021)</p>\r\n",
+        "------=_NextPart_01D8--\r\n",
+    );
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, value) in [
+        ("word/document.xml", document),
+        ("word/_rels/document.xml.rels", rels),
+        ("[Content_Types].xml", content_types.to_string()),
+        ("word/afchunk.mht", mht.to_string()),
+        (
+            "_rels/.rels",
+            format!(r#"<Relationships {RELS}><Relationship Id="main" Type="{TYPE}/officeDocument" Target="word/document.xml"/></Relationships>"#),
+        ),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(value.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+/// **#4374**: the reporter's file opened blank — its whole content is one `w:altChunk` pointing at
+/// an MHT page, which the reader skipped. The page's content is the document's text, in its own
+/// paragraphs, on the page the file gives.
+#[test]
+fn a_better_notes_export_opens_with_its_content() {
+    let bytes = better_notes_export();
+    // What the reader alone gives: no text at all, which is exactly the reported "blank page".
+    let bare = wordcraft_docx::read(&bytes).expect("the package reads");
+    assert!(bare.plain_text(StoryRef::Body).trim().is_empty(), "the defect: no blocks for the embedded page");
+    let doc = crate::io::open_bytes("Testing2.docx", &bytes).expect("opens");
+    let body = doc.plain_text(StoryRef::Body);
+    assert!(body.contains("Zotero note"), "{body:?}");
+    assert!(body.contains("(Verbeke and Lee, 2021)"), "{body:?}");
+    assert_eq!(doc.body.len(), 2, "the page's two paragraphs, and no placeholder of our own: {body:?}");
+    assert_eq!(doc.last_section.page_w, 612.0, "the file's own US Letter page");
+}
