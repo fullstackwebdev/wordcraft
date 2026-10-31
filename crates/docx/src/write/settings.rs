@@ -225,6 +225,27 @@ pub(super) fn write_comment_ids(
     push_part(entries, overrides, "word/commentsExtensible.xml", w.into_bytes(), &format!("{CT_WML}commentsExtensible+xml"), PartRels::default());
 }
 
+/// The theme part to write: the file's own while the document's theme is as it was read (#3541),
+/// else one built from the model. The kept part carries what a theme built from the model has no
+/// room for — its format scheme, the per-script fonts, the object defaults.
+pub(super) fn theme_part(doc: &Document) -> Vec<u8> {
+    let settings = &doc.settings;
+    // GUARDRAIL: compare the theme the part was read into with the document's theme, never assume
+    // a read document's theme is untouched — Design › Colours and › Fonts change it, and keeping
+    // the file's part then loses the edit (#3541).
+    match (doc.passthrough.get(crate::package::THEME_ORIG), doc.passthrough.get(crate::package::THEME_READ)) {
+        (Some(kept), Some(read)) if !kept.is_empty() && read.as_slice() == crate::package::theme_fingerprint(settings).as_bytes() => {
+            // GUARDRAIL: the kept bytes are the markup without its XML declaration
+            // (`package::theme_markup`) — put the package's own in front, or the part is not XML a
+            // reader can be told the encoding of (#3541).
+            let mut part = W::new().into_bytes();
+            part.extend_from_slice(kept);
+            part
+        }
+        _ => theme_xml(doc),
+    }
+}
+
 pub(super) fn theme_xml(doc: &Document) -> Vec<u8> {
     let s = &doc.settings;
     let names = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
@@ -368,4 +389,111 @@ pub(super) fn app_xml(doc: &Document) -> Vec<u8> {
     }
     w.close("Properties");
     w.into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    use wordcraft_doc::Rgb;
+
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const THEME_PART: &str = "word/theme/theme1.xml";
+    /// The XML declaration every part WordCraft writes in front of its markup (`xml::W::new`).
+    const XML_DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
+
+    /// A theme shaped like Word's: system colours in the scheme, per-script fonts beside the Latin
+    /// ones, a format scheme with a gradient, and object defaults — none of which the model holds.
+    const THEME: &str = concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
+        r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme"><a:themeElements>"#,
+        r#"<a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>"#,
+        r#"<a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1>"#,
+        r#"<a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4>"#,
+        r#"<a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink>"#,
+        r#"<a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme>"#,
+        r#"<a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/>"#,
+        r#"<a:font script="Jpan" typeface="Yu Gothic Light"/><a:font script="Arab" typeface="Times New Roman"/></a:majorFont>"#,
+        r#"<a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/><a:font script="Jpan" typeface="Yu Mincho"/></a:minorFont></a:fontScheme>"#,
+        r#"<a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>"#,
+        r#"<a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:lumMod val="110000"/></a:schemeClr></a:gs>"#,
+        r#"<a:gs pos="100000"><a:schemeClr val="phClr"><a:satMod val="105000"/><a:tint val="67000"/></a:schemeClr></a:gs></a:gsLst>"#,
+        r#"<a:lin ang="5400000" scaled="0"/></a:gradFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>"#,
+        r#"<a:lnStyleLst><a:ln w="6350" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>"#,
+        r#"<a:prstDash val="solid"/><a:miter lim="800000"/></a:ln><a:ln w="12700" cap="flat" cmpd="sng" algn="ctr"><a:solidFill>"#,
+        r#"<a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>"#,
+        r#"<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle>"#,
+        r#"<a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>"#,
+        r#"<a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme>"#,
+        r#"</a:themeElements><a:objectDefaults><a:spDef><a:spPr/><a:bodyPr/><a:lstStyle/><a:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef>"#,
+        r#"<a:fillRef idx="3"><a:schemeClr val="accent1"/></a:fillRef></a:style></a:spDef></a:objectDefaults><a:extraClrSchemeLst/></a:theme>"#,
+    );
+
+    /// A package whose main document is one paragraph and which relates `theme` as its theme.
+    fn package(theme: &str) -> Vec<u8> {
+        let doc = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Text</w:t></w:r></w:p></w:body></w:document>"#;
+        let root = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>"#
+        );
+        let rels = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/theme" Target="theme/theme1.xml"/></Relationships>"#
+        );
+        let types = r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#;
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            ("[Content_Types].xml", types),
+            ("_rels/.rels", &root),
+            ("word/document.xml", doc),
+            ("word/_rels/document.xml.rels", &rels),
+            (THEME_PART, theme),
+        ] {
+            zw.start_file(name, zip::write::SimpleFileOptions::default()).expect("entry");
+            zw.write_all(bytes.as_bytes()).expect("write");
+        }
+        zw.finish().expect("zip").into_inner()
+    }
+
+    /// The theme's markup without its XML declaration: what a Word XML Document (Flat OPC) inlines
+    /// in `pkg:xmlData` (`flat::xml_fragment`), and so what a save reads back from one.
+    fn markup() -> &'static str {
+        THEME.strip_prefix(XML_DECL).expect("the theme starts with the package's declaration")
+    }
+
+    /// One part of a package, as written.
+    fn part(bytes: &[u8], name: &str) -> Vec<u8> {
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("package");
+        let mut out = Vec::new();
+        z.by_name(name).expect(name).read_to_end(&mut out).expect("part");
+        out
+    }
+
+    /// Opening a file and saving it unchanged writes its theme part back byte for byte (#3541: the
+    /// theme was rebuilt from the model, so its format scheme, per-script fonts and object defaults
+    /// were replaced), and a theme edited in WordCraft is still written from the model.
+    #[test]
+    fn the_theme_part_is_saved_as_it_was_read() {
+        let doc = crate::read(&package(THEME)).expect("read");
+        assert_eq!(doc.settings.theme_name, "Office Theme", "the theme is read");
+        let saved = part(&crate::write(&doc).expect("write"), THEME_PART);
+        assert_eq!(String::from_utf8_lossy(&saved), THEME, "the theme part is not the file's own");
+        // Opening the saved file again keeps it, so a save loop changes nothing.
+        let reopened = crate::read(&crate::write(&doc).expect("write")).expect("reopen");
+        assert_eq!(part(&crate::write(&reopened).expect("write"), THEME_PART), saved, "the theme changes on the second save");
+        // GUARDRAIL: a Flat OPC file inlines a part's markup without its XML declaration, so the
+        // same theme read from a .docx and from a Word XML file must be stored — and written — as
+        // the one part: keeping the declaration broke `roundtrip::flat_opc_round_trip_equals_docx`
+        // (#3541).
+        let flat = crate::read(&package(markup())).expect("read without a declaration");
+        assert_eq!(part(&crate::write(&flat).expect("write"), THEME_PART), saved, "a theme without a declaration is kept differently");
+
+        // Design › Colours and › Fonts change the theme the part was read into: the part is then
+        // built from the model, with the edit in it.
+        let mut edited = doc.clone();
+        edited.settings.theme_colors[4] = Rgb(1, 2, 3);
+        edited.settings.major_font = "Georgia".into();
+        let written = String::from_utf8_lossy(&part(&crate::write(&edited).expect("write"), THEME_PART)).into_owned();
+        assert!(written.contains(r#"<a:accent1><a:srgbClr val="010203"/></a:accent1>"#), "{written}");
+        assert!(written.contains(r#"<a:latin typeface="Georgia"/>"#), "{written}");
+        assert_ne!(written, THEME, "an edited theme is not the file's own");
+    }
 }

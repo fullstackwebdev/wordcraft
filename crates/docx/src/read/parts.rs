@@ -160,7 +160,26 @@ impl Reader<'_> {
         if let Some(n) = t.attr("name").filter(|n| !n.is_empty()) {
             self.doc.settings.theme_name = n.to_string();
         }
-        let Some(el) = t.child("a:themeElements") else { return };
+        if let Some(el) = t.child("a:themeElements") {
+            self.read_theme_elements(el);
+        }
+        // GUARDRAIL: the theme was rebuilt from the model on every save, which replaced most of
+        // Word's theme (its format scheme, per-script fonts, object defaults) — #3541. Keep the
+        // part as read, with the theme it was read into: a save writes the part back while the
+        // theme is unchanged and builds one from the model once it is edited.
+        // GUARDRAIL: keep the markup without its XML declaration (`package::theme_markup`) — a
+        // Flat OPC file inlines parts without one, so the raw bytes of the same theme differ by
+        // the reader, and the passthrough bytes are compared by `Document`'s equality (#3541).
+        if let Some(bytes) = self.pkg.get_shared(path).and_then(|b| crate::package::theme_markup(b)) {
+            self.doc.passthrough.insert(crate::package::THEME_ORIG.into(), Arc::new(bytes.to_vec()));
+            let print = crate::package::theme_fingerprint(&self.doc.settings);
+            self.doc.passthrough.insert(crate::package::THEME_READ.into(), Arc::new(print.into_bytes()));
+        }
+    }
+
+    /// `a:themeElements` of a theme part: the colour scheme, the fill styles and the fonts into the
+    /// document's settings, which is what drawing, styles and the theme written from the model use.
+    fn read_theme_elements(&mut self, el: &El) {
         if let Some(cs) = el.child("a:clrScheme") {
             let names = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
             let mut colors = self.doc.settings.theme_colors.clone();

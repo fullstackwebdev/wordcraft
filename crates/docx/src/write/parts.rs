@@ -1,6 +1,6 @@
 use super::bibliography::{bibliography_props_xml, bibliography_xml};
 use super::settings::{
-    ANONYMOUS_INITIALS, annotation_author, app_xml, core_xml, note_id_base, notes_part, settings_xml, theme_xml, write_comment_ids,
+    ANONYMOUS_INITIALS, annotation_author, app_xml, core_xml, note_id_base, notes_part, settings_xml, theme_part, write_comment_ids,
 };
 use super::styles::{numbering_xml, styles_xml};
 use super::{
@@ -155,7 +155,7 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
         &mut entries,
         &mut overrides,
         "word/theme/theme1.xml",
-        theme_xml(doc),
+        theme_part(doc),
         "application/vnd.openxmlformats-officedocument.theme+xml",
         PartRels::default(),
     );

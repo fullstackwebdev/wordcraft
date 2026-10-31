@@ -65,6 +65,57 @@ pub const GLOSSARY_BEHAVIORS: [&str; 3] = ["content", "p", "pg"];
 /// A fingerprint of `glossary` (FNV-1a over its debug form): stable across runs and builds that
 /// keep the model's shape, and cheap (nothing is allocated).
 pub fn glossary_fingerprint(glossary: &[wordcraft_doc::BuildingBlock]) -> String {
+    fnv_debug(glossary)
+}
+
+/// `Document::passthrough` key: the theme part's markup as read (`word/theme/theme1.xml` in Word's
+/// files: see [`theme_markup`]), written back unchanged while the document's theme is as it was
+/// read. Not a package part: WordCraft's own bookkeeping (the writer always names the theme
+/// `word/theme/theme1.xml`).
+pub const THEME_ORIG: &str = "wordcraft:theme.orig";
+/// `Document::passthrough` key: a fingerprint of the document's theme as read (see
+/// [`theme_fingerprint`]), so a save can tell an untouched theme — the kept part, written back
+/// unchanged — from one edited in WordCraft, which is written from the model. Not a package part:
+/// WordCraft's own bookkeeping.
+pub const THEME_READ: &str = "wordcraft:theme.read";
+
+/// A theme part's markup as a save writes it: the part without its XML declaration and the
+/// whitespace in front of the markup, `None` when the part isn't UTF-8 XML.
+///
+/// A kept part's bytes are in `Document::passthrough`, which `Document`'s equality compares, and a
+/// Word XML Document (Flat OPC) inlines a part's markup without its declaration (`flat::xml_fragment`,
+/// as a declaration can't nest inside `pkg:xmlData`). Keeping the declaration would make the same
+/// document read from a `.docx` and from a Word XML file compare unequal
+/// (`roundtrip::flat_opc_round_trip_equals_docx`), so the declaration is the package's own: the
+/// writer puts it in front when it writes the kept part.
+// GUARDRAIL: a kept part's bytes are document content that equality and the native JSON copy see —
+// only an encoding the readers of every format agree on may be stored, not whatever the source
+// file happened to spell - #3541's patch broke the Flat OPC round trip by storing the `.docx`
+// part's declaration - strip it on read and write the package's own on save.
+pub fn theme_markup(part: &[u8]) -> Option<&[u8]> {
+    let part = part.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(part);
+    let s = std::str::from_utf8(part).ok()?.trim_start();
+    let s = match s.strip_prefix("<?xml") {
+        Some(rest) => rest.split_once("?>").map(|(_, r)| r)?.trim_start(),
+        None => s,
+    };
+    s.starts_with('<').then_some(s.as_bytes())
+}
+
+/// A fingerprint of the document's theme — the name, the twelve colour scheme values and the major
+/// and minor fonts, which are all the model holds of it and all a theme built from the model is
+/// made of. A save writes the theme part kept from the file while it matches what the theme was
+/// read into, so the parts of Word's theme the model doesn't hold (its format scheme, per-script
+/// fonts, object defaults) survive (#3541).
+pub fn theme_fingerprint(settings: &wordcraft_doc::Settings) -> String {
+    // GUARDRAIL: fingerprint exactly what `write::theme_xml` rebuilds, not all of `Settings` — a
+    // save that regenerates the theme for an unrelated settings change loses Word's format scheme,
+    // and one that keeps it after Design › Colours or › Fonts loses the edit (#3541).
+    fnv_debug(&(&settings.theme_name, &settings.theme_colors, &settings.major_font, &settings.minor_font))
+}
+
+/// FNV-1a over `value`'s debug form (nothing is allocated).
+fn fnv_debug<T: std::fmt::Debug + ?Sized>(value: &T) -> String {
     struct Fnv(u64);
     impl std::fmt::Write for Fnv {
         fn write_str(&mut self, s: &str) -> std::fmt::Result {
@@ -76,7 +127,7 @@ pub fn glossary_fingerprint(glossary: &[wordcraft_doc::BuildingBlock]) -> String
     }
     let mut h = Fnv(0xcbf2_9ce4_8422_2325);
     // Writing into `Fnv` never fails.
-    let _ = std::fmt::Write::write_fmt(&mut h, format_args!("{glossary:?}"));
+    let _ = std::fmt::Write::write_fmt(&mut h, format_args!("{value:?}"));
     format!("{:016x}", h.0)
 }
 
