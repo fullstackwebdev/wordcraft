@@ -156,8 +156,20 @@ impl Session {
     }
 
     /// The document as the PDF of a print job `v` describes (see [`plan`]), with the number of
-    /// distinct pages chosen and copies. Does not touch the document.
+    /// distinct pages chosen and copies. Does not touch the document, and answers with an error
+    /// rather than unwinding: File › Print builds this PDF on the UI thread.
     pub fn print_pdf(&self, v: &Value) -> Result<(Vec<u8>, PrintPlan), CmdError> {
+        // GUARDRAIL: File › Print builds this PDF on the UI thread, outside `Session::run`'s
+        // guard, so a panic in the layout or the writer closed the app instead of failing the job
+        // (#4563, #4333: the window goes when Print is pressed). Every other copy of the document
+        // goes through `run`, which turns a panic into an error; this one now does too. The build
+        // only reads the session and keeps its layout cache local, so unwinding here leaves the
+        // document untouched.
+        guarded_build(|| self.print_job(v))
+    }
+
+    /// [`Session::print_pdf`]'s build; [`guarded_build`] catches whatever it panics with.
+    fn print_job(&self, v: &Value) -> Result<(Vec<u8>, PrintPlan), CmdError> {
         // Print Markup (File › Print) decides whether tracked changes and comments print.
         let markup = crate::cmd::file::export_options(self, v);
         let lay = self.export_layout_with(markup.markup);
@@ -174,6 +186,20 @@ impl Session {
         };
         let bytes = wordcraft_pdf::export_layout(&self.doc, &lay, &opts).map_err(|e| CmdError::Failed(e.to_string()))?;
         Ok((bytes, plan))
+    }
+}
+
+/// Runs a print job's build, turning a panic into the job's error the way [`Session::run`] does
+/// for commands: the PDF of a print is built where nobody can catch it (#4563).
+fn guarded_build<T>(build: impl FnOnce() -> Result<T, CmdError>) -> Result<T, CmdError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail =
+                payload.downcast_ref::<&str>().map(|s| (*s).to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_default();
+            log::error!("printing panicked: {detail}");
+            Err(CmdError::Failed(if detail.is_empty() { "printing panicked".to_string() } else { format!("printing panicked: {detail}") }))
+        }
     }
 }
 
@@ -295,5 +321,18 @@ mod tests {
         s.run("file.printPdf", &json!({"path": outside})).unwrap();
         assert!(base.join("outside/job.pdf").is_file());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// #4563: File › Print builds the job's PDF on the UI thread, where a panic closes the app
+    /// instead of failing the job. The build's guard is `print_pdf`'s own seam, so a build that
+    /// gives up answers with a print error and a build that works is untouched.
+    #[test]
+    fn a_panic_in_the_print_build_fails_the_job_not_the_app() {
+        let e = guarded_build(|| -> Result<(), CmdError> { panic!("the layout gave up") }).unwrap_err().to_string();
+        assert!(e.contains("printing panicked: the layout gave up"), "{e}");
+        assert_eq!(guarded_build(|| Ok::<_, CmdError>(2)).unwrap(), 2, "a build that works is left alone");
+        // A panic without a message still names the route, rather than an empty error.
+        let e = guarded_build(|| -> Result<(), CmdError> { std::panic::panic_any(7u8) }).unwrap_err().to_string();
+        assert_eq!(e, "printing panicked", "{e}");
     }
 }
