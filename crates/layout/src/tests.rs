@@ -4629,6 +4629,12 @@ fn footnote(d: &mut Document, pos: &Pos, text: &str) -> u32 {
     id
 }
 
+/// A floating object behind the text (what a document's background picture is), placed from the
+/// page: `wrapNone` and `behindDoc` in the file.
+fn behind_float(x: f32, y: f32) -> wordcraft_doc::para::Float {
+    wordcraft_doc::para::Float { wrap: wordcraft_doc::para::Wrap::BehindText, ..page_float(x, y) }
+}
+
 fn page_float(x: f32, y: f32) -> wordcraft_doc::para::Float {
     wordcraft_doc::para::Float {
         wrap: wordcraft_doc::para::Wrap::InFrontOfText,
@@ -6414,6 +6420,38 @@ fn a_float_anchor_does_not_push_a_wide_picture_to_a_second_line() {
     };
     assert_eq!(lines_of(false), 1);
     assert_eq!(lines_of(true), 1, "the anchor gets no line of its own");
+}
+
+/// A floating object anchored at the start of a paragraph takes no room, so it must not become a
+/// break of its own when the paragraph's first word is wider than the line: the word breaks (only
+/// as early as it must) and the anchor keeps the first line with it, instead of leaving the text a
+/// line start and the anchor a blank line above it (#1551: a page-sized background anchored before
+/// the cover's 100 pt title cost it a whole 95 pt line).
+#[test]
+fn a_float_anchor_before_an_over_long_word_leaves_no_line_of_its_own() {
+    let shape_of = |with_anchor: bool| {
+        let mut d = Document::from_text("Indivisibility");
+        // The bundled face and size, so the break does not depend on the host's fonts.
+        d.styles.default_chr.font = Some(WRAP_TEST_FONT.into());
+        d.styles.default_chr.size = Some(12.0);
+        // A 30 pt line: the word is wider than it, so the line must break inside the word.
+        d.last_section.margin_left = 291.0;
+        d.last_section.margin_right = 291.0;
+        let start = Pos::body(0, 0);
+        if with_anchor {
+            d.insert_object(&start, rect_shape(20.0, 10.0, behind_float(20.0, 20.0)), &Default::default()).unwrap();
+        }
+        let l = lay(&d);
+        let Some(Placed::Lines { para, .. }) = l.pages[0].items.iter().find(|i| matches!(i, Placed::Lines { path, .. } if path.0 == [0])) else {
+            panic!("the paragraph is on page one")
+        };
+        (para.lines.len(), para.lines[0].stop - para.lines[0].start)
+    };
+    let (plain_lines, plain_first) = shape_of(false);
+    assert!(plain_lines > 1, "the word is wider than the line: {plain_lines} lines");
+    let (anchored_lines, anchored_first) = shape_of(true);
+    assert_eq!(anchored_lines, plain_lines, "the anchor gets no line of its own");
+    assert!(anchored_first > plain_first, "the first line holds the anchor and the word's start");
 }
 
 #[test]

@@ -3,7 +3,7 @@ use super::builder::{Builder, left_out, overstrike};
 use super::chars::caps_char;
 use super::grid::{auto_space, snap_chars};
 use super::justify::hyphenation_points;
-use super::lines::break_lines;
+use super::lines::{break_lines, takes_room};
 use super::model::{ClKind, Cluster, Enclosed, Glyph, Label, LabelRun, ParaEnv, RubyLayout, undrawable_bullet};
 use super::proof::{ProofRun, is_list_item, proof_issues};
 use super::{
@@ -454,7 +454,13 @@ impl<'a> BreakText<'a> {
 fn mark_break_opportunities(clusters: &mut [Cluster], bt: &BreakText, rp: &ResolvedPara) {
     let opps: std::collections::HashSet<usize> = break_positions(&bt.text, rp).into_iter().filter_map(|i| bt.to_para(i)).collect();
     for c in clusters {
-        c.break_after = opps.contains(&c.end) || matches!(c.kind, ClKind::Object(_) | ClKind::Tab);
+        // GUARDRAIL: a floating object's anchor (a `wrapNone`/behind-text picture, and a bookmark or
+        // control marker) takes no room, so a break after it leaves a line with nothing on it — Word
+        // gives the text that line instead (#1551: a page-sized background anchored before the cover's
+        // 100 pt title cost it a blank 95 pt line, and every paragraph starting with an anchor got a
+        // line holding only the anchor). Inline pictures and equations still end a line.
+        let object = matches!(c.kind, ClKind::Object(_)) && takes_room(c);
+        c.break_after = matches!(c.kind, ClKind::Tab) || (takes_room(c) && (opps.contains(&c.end) || object));
     }
 }
 
