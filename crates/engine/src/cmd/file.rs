@@ -354,6 +354,13 @@ fn save(s: &mut Session, v: &Value) -> CmdResult {
         s.clear_recovery_before_password()?;
         s.password = Some(crate::io::Password::new(pw));
     }
+    // A folder picked as the save target (the GTK and portal dialogs can hand one back when a
+    // folder is selected, #4107) is a user-input error said by name: `save_bytes` would answer
+    // with the bare format error "can't save as `.`", which leaves nothing on screen that says
+    // what was wrong with the answer.
+    if path.is_dir() {
+        return Err(CmdError::Failed(format!("{}: it is a folder, not a document file", path.display())));
+    }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let mut opts = export_options(s, v);
     match v.get("format").filter(|f| !f.is_null()) {

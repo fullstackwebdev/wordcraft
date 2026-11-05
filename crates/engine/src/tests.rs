@@ -5417,6 +5417,29 @@ fn a_failed_save_leaves_the_save_stamps_untouched() {
     assert!(s.dirty, "still unsaved");
 }
 
+/// #4107 (Linux: app exits after selecting a folder while enabling AutoSave): a folder handed to
+/// `file.save` as the target (what the GTK and portal dialogs can return when a folder is
+/// selected) is a user-input error said by name. The write layer used to answer with the bare
+/// format error "can't save as `.`", which left nothing on screen that says what was wrong with
+/// the answer. Nothing is written, and the folder is left alone.
+// GUARDRAIL: a save target is user input and may be a folder — assert the named error and that nothing is written, never that a save "works" — the bare format error explained nothing (#4107, v0.8.0)
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_folder_as_the_save_target_is_named_in_the_error() {
+    let dir = scratch_dir("save-target-folder");
+    let folder = dir.join("Destination");
+    std::fs::create_dir(&folder).unwrap();
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text": "draft"}));
+    let error = s.run("file.save", &json!({"path": folder.to_string_lossy()}));
+    assert!(error.is_err(), "a folder is not a document file to save to");
+    assert!(error.unwrap_err().to_string().contains("is a folder"), "the error names the folder answer");
+    assert!(folder.is_dir() && std::fs::read_dir(&folder).unwrap().count() == 0, "the folder is left alone");
+    assert!(s.path.is_none(), "the folder never becomes the document's path");
+    assert!(s.dirty, "the document stays unsaved");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn html_pictures_load_relative_to_the_file() {
