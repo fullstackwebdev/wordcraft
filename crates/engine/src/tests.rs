@@ -5422,7 +5422,6 @@ fn a_failed_save_leaves_the_save_stamps_untouched() {
 /// selected) is a user-input error said by name. The write layer used to answer with the bare
 /// format error "can't save as `.`", which left nothing on screen that says what was wrong with
 /// the answer. Nothing is written, and the folder is left alone.
-// GUARDRAIL: a save target is user input and may be a folder — assert the named error and that nothing is written, never that a save "works" — the bare format error explained nothing (#4107, v0.8.0)
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_folder_as_the_save_target_is_named_in_the_error() {

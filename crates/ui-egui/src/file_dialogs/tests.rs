@@ -415,7 +415,6 @@ fn a_failed_autosave_switch_save_as_says_so_and_leaves_autosave_off() {
 /// reproduced at HEAD; the neighbouring
 /// `a_failed_autosave_switch_save_as_says_so_and_leaves_autosave_off` answers with a missing
 /// `out.docx` and so could not cover a folder answer.
-// GUARDRAIL: a file-dialog answer is user input and may be a folder — assert the app survives it and names the problem, never that a save "works" — a folder path reaching `file.save` used to answer "can't save as `.`", which explains nothing (#4107, v0.8.0)
 #[test]
 fn a_folder_picked_as_the_autosave_target_is_reported_and_the_app_stays_open() {
     let dir = scratch("autosave-switch-folder");
