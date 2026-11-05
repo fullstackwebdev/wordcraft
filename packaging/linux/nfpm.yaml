@@ -22,22 +22,26 @@ description: |-
   and writes .docx, opens .odt, .rtf, .html, .md and .txt, and exports PDF.
   Includes wordcraft-cli, a headless converter and command runner.
 
-# The binaries link only glibc and libgcc_s directly. Windowing (X11/Wayland, xkbcommon) and the
-# GPU (Vulkan, EGL/GL) are loaded at runtime, so they are dependencies/recommendations here
-# rather than ELF NEEDED entries.
+# The binaries link only glibc and libgcc_s directly. Everything else (X11/Wayland, xkbcommon, the
+# GPU: Vulkan/EGL) is loaded at runtime with dlopen, so ldd shows nothing — a stock system without
+# e.g. libxkbcommon-x11 used to panic on launch instead of showing an error (#4015, #5363).
+# package.sh also bundles these libraries as a fallback, but the packages' metadata still declares
+# what a system install needs: these are hard requirements for the app to open a window, not
+# optional accelerators. The X11 libraries used to be mere recommends, yet winit needs them.
 overrides:
   deb:
     depends:
       - libc6 (>= 2.35)
       - libgcc-s1
       - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libx11-6
+      - libxcb1
+      - libxcursor1
+      - libxi6
       - libvulkan1 | libegl1
     recommends:
       - libwayland-client0
-      - libx11-6
-      - libx11-xcb1
-      - libxcursor1
-      - libxi6
       - libxrandr2
       - mesa-vulkan-drivers
       - xdg-desktop-portal
@@ -49,12 +53,14 @@ overrides:
       - libm.so.6(GLIBC_2.35)(64bit)
       - libgcc_s.so.1()(64bit)
       - libxkbcommon.so.0()(64bit)
+      - libxkbcommon-x11.so.0()(64bit)
+      - libX11.so.6()(64bit)
+      - libxcb.so.1()(64bit)
+      - libXcursor.so.1()(64bit)
+      - libXi.so.6()(64bit)
       - (libvulkan.so.1()(64bit) or libEGL.so.1()(64bit))
     recommends:
       - libwayland-client
-      - libX11
-      - libXcursor
-      - libXi
       - libXrandr
       - mesa-vulkan-drivers
       - xdg-desktop-portal
@@ -66,6 +72,13 @@ contents:
   - src: ${STAGE}/usr/bin/wordcraft-cli
     dst: /usr/bin/wordcraft-cli
     file_info: { mode: 0755 }
+  # Runtime libraries the binary dlopens, bundled by package.sh as a fallback for systems whose
+  # package metadata can't be satisfied (or for rpm on distributions without the sonames above).
+  # Under /usr/lib rather than /usr/lib/<triplet>, so a distro's own copy (found through
+  # ld.so.cache first) always wins over the bundled one.
+  - src: ${STAGE}/usr/lib/
+    dst: /usr/lib/
+    type: tree
   # Named one by one rather than as a tree of /usr/share: a tree would also own shared directories
   # such as /usr/share/mime, which openSUSE's filesystem package owns with other modes, and RPM
   # refuses to install a package that conflicts with it.

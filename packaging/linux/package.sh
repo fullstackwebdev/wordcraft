@@ -2,6 +2,7 @@
 # Build and package WordCraft for Linux (<arch> is x86_64 or aarch64, or riscv64 when cross-compiling):
 #
 #   $DIST/wordcraft-<version>-linux-<arch>.AppImage  any distro with glibc >= the build host's
+#     (runtime libraries the app dlopens — X11/Wayland, xkbcommon, Vulkan/EGL — are bundled)
 #   $DIST/wordcraft-<version>-linux-<arch>.AppImage.zsync  delta updates (needs zsyncmake)
 #   $DIST/wordcraft-<version>-linux-<arch>.deb       Debian, Ubuntu, Mint, Pop!_OS, ...
 #   $DIST/wordcraft-<version>-linux-<arch>.rpm       Fedora, openSUSE, RHEL, ...
@@ -68,6 +69,32 @@ cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/usr/share/icons/"
 mkdir -p "$STAGE/usr/share/doc/wordcraft"
 copy_docs "$STAGE/usr/share/doc/wordcraft"
 
+# Bundle the runtime libraries that the binary loads with dlopen (windowing: X11/Wayland, xkbcommon
+# and the GPU: Vulkan/EGL/GL). They are not ELF NEEDED entries, so ldd shows nothing and a stock
+# install or a bare AppImage fails to launch without an error on the screen (e.g. #4015: the
+# panic in xkbcommon-dl when libxkbcommon-x11 is missing). Build native (CI: ubuntu-22.04
+# runners, glibc 2.35) so the bundle matches the binaries' glibc floor. riscv64 cross-builds run
+# an emulator and have no native sysroot, so only their host-only list is packaged.
+RUNTIME_LIBS_CORE="libxkbcommon.so.0 libxkbcommon-x11.so.0 libdbus-1.so.3"
+RUNTIME_LIBS_X11="libX11.so.6 libX11-xcb.so.1 libxcb.so.1 libXcursor.so.1 libXi.so.6 libXrandr.so.2"
+RUNTIME_LIBS_WAYLAND="libwayland-client.so.0 libwayland-egl.so.1"
+RUNTIME_LIBS_GPU="libvulkan.so.1 libEGL.so.1"
+if [[ -n "${CROSS_TARGET:-}" && -z "${EMULATOR:-}" ]]; then
+  # True cross-build: the host sysroot does not match the target, so bundling would embed
+  # unusable libraries; the deb/rpm's depends/recommends carry the requirement instead.
+  RUNTIME_LIBS="$RUNTIME_LIBS_CORE"
+else
+  RUNTIME_LIBS="$RUNTIME_LIBS_CORE $RUNTIME_LIBS_X11 $RUNTIME_LIBS_WAYLAND $RUNTIME_LIBS_GPU"
+fi
+for lib in $RUNTIME_LIBS; do
+  path="$(ldconfig -p 2>/dev/null | awk -v lib="$lib" '$1 == lib { print $NF; exit }')"
+  if [[ -z "$path" ]]; then
+    echo "warning: runtime library $lib not found on the build host; not bundling it" >&2
+    continue
+  fi
+  install -Dm755 "$path" "$STAGE/usr/lib/$lib"
+done
+
 if command -v desktop-file-validate >/dev/null; then
   desktop-file-validate "$STAGE/usr/share/applications/$APP_ID.desktop"
 fi
@@ -131,7 +158,19 @@ if has appimage; then
   }
   APPDIR="$WORK/WordCraft.AppDir"
   cp -R "$STAGE" "$APPDIR"
-  ln -s usr/bin/wordcraft "$APPDIR/AppRun"
+  # AppRun makes the bundled runtime libraries visible to the app (and to anything it dlopens)
+  # without touching the system's search path: the AppImage's libraries must not leak into other
+  # programs, and the system's must stay behind the bundled ones.
+  cat >"$APPDIR/AppRun" <<'SCRIPT'
+#!/bin/sh
+# WordCraft AppRun: prefer the runtime libraries bundled in this AppImage (see
+# packaging/linux/package.sh), then whatever the system provides.
+HERE="$(dirname "$(readlink -f "$0")")"
+LD_LIBRARY_PATH="${HERE}/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH
+exec "$HERE/usr/bin/wordcraft" "$@"
+SCRIPT
+  chmod 755 "$APPDIR/AppRun"
   cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"
   cp "$ROOT/assets/app-icon/hicolor/256x256/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
   ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
