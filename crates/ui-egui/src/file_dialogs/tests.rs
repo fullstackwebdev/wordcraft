@@ -406,6 +406,37 @@ fn a_failed_autosave_switch_save_as_says_so_and_leaves_autosave_off() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// #4107 (Linux: app exits after selecting a folder while enabling AutoSave): the Save As the
+/// AutoSave switch opens, answered with a folder (what the GTK and portal dialogs can return when
+/// a folder is selected), is a user-input error the app must say out loud *by name*: no exit, no
+/// quit request, no silently enabled AutoSave over a path it cannot write, and not the bare
+/// format error `can't save as \`.`\`` the write layer used to produce, which left nothing on
+/// screen that says what was wrong with the answer. The exit the issue reports could not be
+/// reproduced at HEAD; the neighbouring
+/// `a_failed_autosave_switch_save_as_says_so_and_leaves_autosave_off` answers with a missing
+/// `out.docx` and so could not cover a folder answer.
+// GUARDRAIL: a file-dialog answer is user input and may be a folder — assert the app survives it and names the problem, never that a save "works" — a folder path reaching `file.save` used to answer "can't save as `.`", which explains nothing (#4107, v0.8.0)
+#[test]
+fn a_folder_picked_as_the_autosave_target_is_reported_and_the_app_stays_open() {
+    let dir = scratch("autosave-switch-folder");
+    let folder = dir.join("Destination");
+    std::fs::create_dir(&folder).unwrap();
+    let (mut a, shown) = async_app();
+    typed(&mut a);
+    a.save_as(AfterSave::AutoSave);
+    answer(&shown, Some(&folder.to_string_lossy()));
+    let r = a.poll_file_dialog().unwrap().unwrap();
+    assert_eq!(r["saved"], false, "a folder is not a file to save to");
+    assert!(!a.quit_requested, "a folder answer must never ask the app to quit");
+    assert!(a.has_document() && body_text(&a).contains(UNSAVED), "the document and its text are kept");
+    assert!(a.session.path.is_none(), "the folder did not become the document's file");
+    assert!(!a.autosaves(), "AutoSave must not claim a folder it cannot write");
+    assert!(folder.is_dir(), "the picked folder is left alone");
+    let msg = a.status_msg.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(msg.contains("is a folder"), "the error names the folder answer, not a format: {msg:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// While a dialog is open, more Save As / Open / Export / Picture clicks don't open a second one.
 #[test]
 fn a_second_dialog_while_one_is_open_is_ignored() {
